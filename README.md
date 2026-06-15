@@ -2,7 +2,7 @@
 
 Standalone headless Mumble recorder service. Records mixed channel audio to WAV.
 
-**Current scope:** Spike proof-of-concept. Tests basic connectivity, channel joining, and audio capture.
+**Current scope:** Recorder core MVP implementation. Supports two recording modes (continuous and received_audio_only) with segment rotation, metadata, and session-aware filenames.
 
 ## Requirements
 
@@ -35,12 +35,14 @@ Standalone headless Mumble recorder service. Records mixed channel audio to WAV.
 |----------|---------|----------|-------|
 | `MUMBLE_HOST` | - | Yes | Mumble server hostname or IP |
 | `MUMBLE_PORT` | `64738` | No | Mumble server port |
-| `MUMBLE_USERNAME` | `RecorderBot` | No | Bot display name in Mumble |
+| `MUMBLE_USERNAME` | `Recorder` | No | Bot display name in Mumble |
 | `MUMBLE_PASSWORD` | `` (empty) | No | Server password if required |
 | `MUMBLE_CHANNEL` | - | Yes | Channel name to join and record |
-| `RECORDING_SECONDS` | `30` | No | Duration to record in seconds |
+| `RECORDING_SECONDS` | `60` | No | Duration to record in seconds |
 | `MUMBLE_CONNECT_TIMEOUT_SECONDS` | `30` | No | Max seconds to wait for connection |
-| `OUTPUT_FILE` | `/recordings/spike-recording.wav` | No | Output WAV file path (inside container) |
+| `OUTPUT_DIR` | `/recordings` | No | Output directory for recording segments (inside container) |
+| `RECORDING_MODE` | `continuous` | No | Recording mode: `continuous` or `received_audio_only` |
+| `SEGMENT_DURATION_SECONDS` | `1800` | No | Segment duration in seconds (default 30 minutes) |
 
 ## Build
 
@@ -67,31 +69,124 @@ MSYS_NO_PATHCONV=1 docker run --rm \
   mumble-recorder:spike
 ```
 
-Output file will be at `recordings/spike-recording.wav` (local directory).
+Output files will be at `recordings/` (local directory).
 
-## Run (Docker Compose)
+## Recording Modes
 
-1. Copy and edit the example config:
-   ```bash
-   cp .env.example .env.local
-   # Edit .env.local with your server details
-   ```
+### Continuous Mode (default)
+- **Behavior**: Preserves wall-clock duration by inserting silence between received audio chunks
+- **Output**: Segment WAV files with duration approximately equal to segment duration (default 1800s)
+- **Use case**: Archive entire call duration, including silence
+- **Example**: 30-second run with 5 seconds of speech → 30 seconds of WAV (25s silence + 5s audio)
 
-2. Start recording:
-   ```bash
-   docker-compose -f docker-compose.example.yml up
-   ```
+### Received Audio Only Mode
+- **Behavior**: Writes only PCM chunks received from Mumble
+- **Output**: Segment WAV files with duration matching actual received audio only
+- **Use case**: Compact archive of speech only, reduce file size
+- **Example**: 30-second run with 5 seconds of speech → 5 seconds of WAV
 
-3. Output appears in `./recordings/`
+Both modes produce metadata JSON files with wall-clock duration recorded.
+
+## Validation (Local Testing)
+
+### Setup for Testing
+```bash
+# Copy example config
+cp .env.example .env.local
+
+# Edit .env.local with your Mumble server details, then set short durations:
+RECORDING_MODE=continuous
+SEGMENT_DURATION_SECONDS=10
+RECORDING_SECONDS=30
+```
+
+### Build and Run Tests
+```bash
+# Run unit tests
+python -m pytest tests/ -v
+# or with unittest:
+python -m unittest discover tests/ -v
+```
+
+### Build Docker Image
+```bash
+docker build -t mumble-recorder:local .
+```
+
+### Continuous Mode Validation
+```bash
+# Set environment for testing
+export $(cat .env.local | xargs)
+export RECORDING_MODE=continuous
+export SEGMENT_DURATION_SECONDS=10
+export RECORDING_SECONDS=30
+
+# Run in Docker
+mkdir -p recordings
+REC_DIR="$(pwd)/recordings"
+docker run --rm \
+  -e MUMBLE_HOST="$MUMBLE_HOST" \
+  -e MUMBLE_PORT="$MUMBLE_PORT" \
+  -e MUMBLE_USERNAME="$MUMBLE_USERNAME" \
+  -e MUMBLE_PASSWORD="$MUMBLE_PASSWORD" \
+  -e MUMBLE_CHANNEL="$MUMBLE_CHANNEL" \
+  -e RECORDING_SECONDS=30 \
+  -e RECORDING_MODE=continuous \
+  -e SEGMENT_DURATION_SECONDS=10 \
+  -v "$REC_DIR:/recordings" \
+  mumble-recorder:local
+
+# Verify output
+ls -lh recordings/
+```
+
+### Check Duration with ffprobe
+```bash
+# Check WAV duration and properties
+ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1:noprint_wrappers=1 recordings/*.wav
+
+# Or with wave module
+python -c "import wave; w=wave.open('recordings/*.wav'); print(f'Duration: {w.getnframes() / w.getframerate():.2f}s')"
+```
+
+### Received Audio Only Validation
+```bash
+# Set received_audio_only mode
+export RECORDING_MODE=received_audio_only
+export SEGMENT_DURATION_SECONDS=10
+
+# Run and observe shorter WAV durations
+# (only actual audio received, no silence padding)
+```
+
+### Verify Metadata
+```bash
+# Check session metadata
+cat recordings/*_session_metadata.json | python -m json.tool
+
+# Should show:
+# - recording_mode: continuous or received_audio_only
+# - wall_clock_duration_seconds: ~30 (total session time)
+# - audio_duration_seconds: varies by mode
+# - segment_duration_seconds: 10
+# - segments: list of segment metadata with timestamps and durations
+```
+
+### Spike Diagnostic Entrypoint
+The original spike is still available for manual diagnostic use:
+```bash
+# Run spike directly (in-memory recording, no segments/metadata)
+python -m mumble_recorder.spike
+```
 
 ## Verify Recording
 
 ```bash
-# Check file exists and has content
-ls -lh recordings/spike-recording.wav
+# Check files in output directory
+ls -lh recordings/
 
-# Play the file (with ffplay, sox, or media player)
-ffplay recordings/spike-recording.wav
+# Play a segment WAV file
+ffplay recordings/*.wav
 ```
 
 ## Spike Proof-of-Concept Results
@@ -113,16 +208,7 @@ ffplay recordings/spike-recording.wav
 
 The spike implements **received-audio-only** recording. It writes only PCM chunks received from Mumble callbacks; it does not preserve wall-clock silence. This is acceptable for the spike and represents a design choice for the MVP.
 
-## MVP Recording Modes (Planned)
-
-The MVP will support two recording modes:
-
-- **`continuous`** (default): Preserves wall-clock duration by inserting silence between received audio chunks. Segment rotation is based on wall-clock time.
-- **`received_audio_only`**: Writes only PCM chunks received from Mumble, similar to the spike. Suitable for archival of active speech only.
-
-In `continuous` mode, each segment exposes its exact wall-clock start time.
-
-### Segment Filename Convention (Planned)
+### Segment Filename Convention
 
 Segment filenames follow a session-aware pattern:
 
@@ -135,23 +221,34 @@ Example:
 20260615-102713_test_s7f3a_seg-20260615-105713.wav
 ```
 
-This pattern avoids ambiguity in multi-session or archival contexts by embedding both the session start and segment start timestamps.
+This pattern avoids ambiguity by embedding both the session start and segment start timestamps.
+
+## Recorder Core Features (Current Implementation)
+
+**Status:** ✅ MVP implementation complete
+
+- Two recording modes: `continuous` and `received_audio_only`
+- Wall-clock segment rotation (configurable duration)
+- Session and segment metadata (JSON)
+- Session-aware filenames with timestamps
+- Streaming WAV writer (no full audio buffering)
+- Silence insertion in continuous mode
+- Thread-safe audio callback
+- Support for short segment durations for testing
 
 ## Spike Limitations & Troubleshooting
 
-**Audio path validation required:** If logs show "NO AUDIO CALLBACKS RECEIVED" or "NO AUDIO DATA RECEIVED", the audio path is not working. This is a blocker for the spike. Check:
+**Audio path validation required:** If logs show "NO AUDIO CALLBACKS RECEIVED" or "NO AUDIO DATA RECEIVED", the audio path is not working. This is a blocker. Check:
 - Channel name matches exactly (case-sensitive)
 - Server has active speakers in that channel
 - Bot has permission to join and receive audio
 
-**Current spike limitations:**
+**Current implementation scope:**
 - Mixed channel audio only (no per-user tracks).
 - Single recording at a time.
-- Receives audio only; does not preserve wall-clock silence.
-- No file segmentation, retention, or resume on restart.
+- No file retention, cleanup, or resume on restart.
 - No web UI yet.
-- No metadata storage yet.
-- **pymumble maintenance note:** usable for spike, but maintenance risk documented for MVP investment decisions.
+- **pymumble maintenance note:** usable for MVP, but maintenance risk documented for future investments.
 
 ## Logs
 

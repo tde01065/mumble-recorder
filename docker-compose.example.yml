@@ -1,0 +1,10 @@
+version: '3.8'
+
+services:
+  recorder:
+    build: .
+    env_file:
+      - .env.local
+    volumes:
+      - ./recordings:/recordings
+

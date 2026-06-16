@@ -50,6 +50,10 @@ class Recorder:
         self.current_segment: SegmentWriter | None = None
         self.current_segment_index: int = -1
 
+        # Final status exposed after run()
+        self.status: str | None = None
+        self.metadata_path: str | None = None
+
         self.mumble = None
 
     def _signal_handler(self, signum: int, frame) -> None:
@@ -358,6 +362,9 @@ class Recorder:
             self.config.output_dir, f"{self.session_id}_session_metadata.json"
         )
         meta.save_to_file(metadata_file)
+        self.metadata_path = metadata_file
+        self.status = status
+
         logger.info(f"Session metadata saved: {metadata_file}")
 
         logger.info("=== Session Summary ===")

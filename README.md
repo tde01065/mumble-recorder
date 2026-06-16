@@ -181,7 +181,7 @@ python -m mumble_recorder.spike
 
 ## Runtime Hardening Validation
 
-This section demonstrates hardened Docker mounting patterns for Windows (Git Bash / WSL) and validates both normal completion and signal handling.
+This section demonstrates hardened Docker mounting patterns for Windows (Git Bash / WSL) and validates both normal completion and signal handling with proper exit semantics.
 
 ### Setup Recording Directory
 
@@ -208,6 +208,8 @@ MSYS_NO_PATHCONV=1 docker run --rm \
 ```
 
 **Expected outcomes:**
+- CLI exits with code `0`
+- Log message: "Recording completed successfully"
 - Metadata `status=completed`
 - `stop_reason=duration_reached`
 - Wall duration close to 30 seconds
@@ -216,7 +218,7 @@ MSYS_NO_PATHCONV=1 docker run --rm \
 
 ### Docker Stop Signal Validation
 
-Validates that SIGTERM from `docker stop` is handled gracefully, with accurate interruption metadata and segment finalization.
+Validates that SIGTERM from `docker stop` is handled gracefully, with proper exit code and segment finalization. Note: interrupted is NOT a failure—the session finalized cleanly but did not complete the planned duration.
 
 **Terminal 1 — Start long-running recording:**
 
@@ -241,6 +243,8 @@ docker stop --time=10 mumble-recorder-test
 ```
 
 **Expected outcomes:**
+- CLI exits with code `0` (graceful shutdown, not a failure)
+- Log message: "Recording interrupted and finalized cleanly"
 - Metadata `status=interrupted`
 - `stop_reason=signal_sigterm`
 - Actual wall duration less than planned 60 seconds

@@ -149,5 +149,119 @@ class TestRecorderSignalHandling(unittest.TestCase):
             self.assertEqual(call_kwargs["stop_reason"], "duration_reached")
 
 
+class TestRecorderStatusExposure(unittest.TestCase):
+    """Test that recorder exposes status, stop_reason, and metadata_path."""
+
+    def test_recorder_exposes_status_after_metadata_creation(self):
+        """Test that recorder.status is set after _create_session_metadata."""
+        config = _mock_config()
+        recorder = Recorder(config)
+        self.assertIsNone(recorder.status)
+
+        recorder.session_start_wall_clock = datetime.now(timezone.utc).astimezone()
+        recorder.session_stop_wall_clock = datetime.now(timezone.utc).astimezone()
+        recorder.session_start_monotonic = 100.0
+        recorder.session_stop_monotonic = 130.0
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder.config.output_dir = tmpdir
+            recorder._create_session_metadata(is_failed=False, is_interrupted=False)
+
+            self.assertEqual(recorder.status, "completed")
+            self.assertIsNotNone(recorder.metadata_path)
+
+    def test_recorder_exposes_metadata_path(self):
+        """Test that recorder.metadata_path is set correctly."""
+        config = _mock_config()
+        recorder = Recorder(config)
+        self.assertIsNone(recorder.metadata_path)
+
+        recorder.session_start_wall_clock = datetime.now(timezone.utc).astimezone()
+        recorder.session_stop_wall_clock = datetime.now(timezone.utc).astimezone()
+        recorder.session_start_monotonic = 100.0
+        recorder.session_stop_monotonic = 130.0
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder.config.output_dir = tmpdir
+            recorder._create_session_metadata(is_failed=False, is_interrupted=False)
+
+            self.assertIsNotNone(recorder.metadata_path)
+            self.assertTrue(recorder.metadata_path.endswith("_session_metadata.json"))
+
+    def test_recorder_stop_reason_preserved(self):
+        """Test that recorder.stop_reason is always available."""
+        config = _mock_config()
+        recorder = Recorder(config)
+        self.assertEqual(recorder.stop_reason, "duration_reached")
+
+        recorder._signal_handler(signal.SIGTERM, None)
+        self.assertEqual(recorder.stop_reason, "signal_sigterm")
+
+
+class TestCLIExitLogic(unittest.TestCase):
+    """Test CLI exit code and message logic."""
+
+    def test_completed_status_exit_zero_info_message(self):
+        """Test completed status returns exit 0 and info log."""
+        from mumble_recorder.recording_cli import get_cli_exit_info
+
+        exit_code, message, is_error = get_cli_exit_info("completed", True)
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(message, "Recording completed successfully")
+        self.assertFalse(is_error)
+
+    def test_interrupted_status_exit_zero_info_message(self):
+        """Test interrupted status returns exit 0 and info log."""
+        from mumble_recorder.recording_cli import get_cli_exit_info
+
+        exit_code, message, is_error = get_cli_exit_info("interrupted", False)
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(message, "Recording interrupted and finalized cleanly")
+        self.assertFalse(is_error)
+
+    def test_failed_status_exit_one_error_message(self):
+        """Test failed status returns exit 1 and error log."""
+        from mumble_recorder.recording_cli import get_cli_exit_info
+
+        exit_code, message, is_error = get_cli_exit_info("failed", False)
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(message, "Recording failed")
+        self.assertTrue(is_error)
+
+    def test_none_status_success_true_exits_zero(self):
+        """Test None status with success=True acts as completed."""
+        from mumble_recorder.recording_cli import get_cli_exit_info
+
+        exit_code, message, is_error = get_cli_exit_info(None, True)
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(message, "Recording completed successfully")
+        self.assertFalse(is_error)
+
+    def test_none_status_success_false_exits_one(self):
+        """Test None status with success=False acts as failed."""
+        from mumble_recorder.recording_cli import get_cli_exit_info
+
+        exit_code, message, is_error = get_cli_exit_info(None, False)
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(message, "Recording failed")
+        self.assertTrue(is_error)
+
+    def test_status_overrides_success_boolean(self):
+        """Test that explicit status takes precedence over success."""
+        from mumble_recorder.recording_cli import get_cli_exit_info
+
+        # Even if success=True, if status is failed, should exit 1
+        exit_code, message, is_error = get_cli_exit_info("failed", True)
+        self.assertEqual(exit_code, 1)
+        self.assertTrue(is_error)
+
+        # Even if success=False, if status is completed, should exit 0
+        exit_code, message, is_error = get_cli_exit_info("completed", False)
+        self.assertEqual(exit_code, 0)
+        self.assertFalse(is_error)
+
+
+
 if __name__ == "__main__":
     unittest.main()
+

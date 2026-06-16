@@ -64,6 +64,12 @@ class Recorder:
             self.stop_reason = "signal_sigint"
         self.stop_event.set()
 
+    def _handle_mumble_disconnect(self, *args, **kwargs) -> None:
+        """Called when Mumble connection is lost. Mark as disconnected and trigger stop."""
+        if self.stop_reason == "duration_reached":
+            self.stop_reason = "mumble_disconnected"
+        self.stop_event.set()
+
     def _log_config(self) -> None:
         logger.info("=== Recorder Configuration ===")
         logger.info(f"Session ID: {self.session_id} ({self.session_short_id})")
@@ -265,6 +271,12 @@ class Recorder:
                 pymumble.constants.PYMUMBLE_CLBK_SOUNDRECEIVED,
                 self._on_sound_received,
             )
+            # Try to register disconnect callback if available in pymumble_py3
+            if hasattr(pymumble.constants, "PYMUMBLE_CLBK_DISCONNECTED"):
+                self.mumble.callbacks.add_callback(
+                    pymumble.constants.PYMUMBLE_CLBK_DISCONNECTED,
+                    self._handle_mumble_disconnect,
+                )
         except ImportError:
             self.mumble.stop()
             logger.error("pymumble_py3 not available")
@@ -309,7 +321,7 @@ class Recorder:
         self.session_stop_wall_clock = datetime.now(timezone.utc).astimezone()
 
         is_failed = self.stop_reason in ("writer_error", "mumble_connection_failed", "channel_join_failed")
-        is_interrupted = self.stop_reason in ("signal_sigterm", "signal_sigint", "keyboard_interrupt")
+        is_interrupted = self.stop_reason in ("signal_sigterm", "signal_sigint", "keyboard_interrupt", "mumble_disconnected")
         self._create_session_metadata(is_failed=is_failed, is_interrupted=is_interrupted)
 
         logger.info("Recording session completed")

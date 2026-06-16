@@ -356,10 +356,11 @@ This pattern avoids ambiguity by embedding both the session start and segment st
 
 ### Known Limitations
 
-**Mumble Disconnect Handling** (not yet implemented):
-- Unexpected Mumble disconnect during active recording is not explicitly detected or recovered.
-- Current behavior depends on pymumble behavior and may surface as callback starvation, connection errors, or process-level failure.
-- **Planned next slice:** Disconnect detection, interrupted session finalization, optional reconnect with new session or session split.
+**Mumble Disconnect Handling** (now implemented):
+- Unexpected Mumble disconnect during active recording is detected if pymumble_py3 provides a disconnect callback.
+- When detected, the session is marked as `interrupted` with `stop_reason=mumble_disconnected` and finalized cleanly.
+- Exit code is 0 (not a failure—session finalized successfully).
+- **No reconnect:** Current implementation detects disconnect but does not reconnect or resume. Planned next slice can decide reconnect/session-split policy.
 
 ## Logs
 

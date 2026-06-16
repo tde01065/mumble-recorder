@@ -148,6 +148,24 @@ class TestRecorderSignalHandling(unittest.TestCase):
             self.assertEqual(call_kwargs["status"], "completed")
             self.assertEqual(call_kwargs["stop_reason"], "duration_reached")
 
+    def test_mumble_disconnected_session_metadata_has_interrupted_status(self):
+        """Test that mumble_disconnected produces interrupted status."""
+        config = _mock_config()
+        recorder = Recorder(config)
+        recorder.session_start_wall_clock = datetime.now(timezone.utc).astimezone()
+        recorder.session_stop_wall_clock = datetime.now(timezone.utc).astimezone()
+        recorder.session_start_monotonic = 100.0
+        recorder.session_stop_monotonic = 115.0
+        recorder.stop_reason = "mumble_disconnected"
+
+        with patch("mumble_recorder.recording.SessionMetadata") as MockMeta:
+            recorder._create_session_metadata(is_failed=False, is_interrupted=True)
+
+            MockMeta.assert_called_once()
+            call_kwargs = MockMeta.call_args.kwargs
+            self.assertEqual(call_kwargs["status"], "interrupted")
+            self.assertEqual(call_kwargs["stop_reason"], "mumble_disconnected")
+
 
 class TestRecorderStatusExposure(unittest.TestCase):
     """Test that recorder exposes status, stop_reason, and metadata_path."""
@@ -196,6 +214,40 @@ class TestRecorderStatusExposure(unittest.TestCase):
 
         recorder._signal_handler(signal.SIGTERM, None)
         self.assertEqual(recorder.stop_reason, "signal_sigterm")
+
+    def test_mumble_disconnected_sets_stop_reason(self):
+        """Test _handle_mumble_disconnect sets stop_reason."""
+        config = _mock_config()
+        recorder = Recorder(config)
+        self.assertEqual(recorder.stop_reason, "duration_reached")
+        self.assertFalse(recorder.stop_event.is_set())
+
+        recorder._handle_mumble_disconnect()
+
+        self.assertEqual(recorder.stop_reason, "mumble_disconnected")
+        self.assertTrue(recorder.stop_event.is_set())
+
+    def test_mumble_disconnected_accepts_callback_arguments(self):
+        """Test _handle_mumble_disconnect accepts callback arguments."""
+        config = _mock_config()
+        recorder = Recorder(config)
+
+        recorder._handle_mumble_disconnect(object(), reason="test")
+
+        self.assertEqual(recorder.stop_reason, "mumble_disconnected")
+        self.assertTrue(recorder.stop_event.is_set())
+
+    def test_mumble_disconnected_does_not_override_other_reasons(self):
+        """Test that _handle_mumble_disconnect doesn't override explicit stop reasons."""
+        config = _mock_config()
+        recorder = Recorder(config)
+        recorder.stop_reason = "signal_sigterm"
+
+        recorder._handle_mumble_disconnect()
+
+        # Should not override signal_sigterm
+        self.assertEqual(recorder.stop_reason, "signal_sigterm")
+        self.assertTrue(recorder.stop_event.is_set())
 
 
 class TestCLIExitLogic(unittest.TestCase):

@@ -179,6 +179,103 @@ The original spike is still available for manual diagnostic use:
 python -m mumble_recorder.spike
 ```
 
+## Runtime Hardening Validation
+
+This section demonstrates hardened Docker mounting patterns for Windows (Git Bash / WSL) and validates both normal completion and signal handling.
+
+### Setup Recording Directory
+
+```bash
+rm -rf recordings/*
+mkdir -p recordings
+REC_DIR="$(pwd | sed 's#^/c/#/mnt/c/#')/recordings"
+```
+
+### Normal Completion Validation
+
+Validates that a recording completes successfully within planned duration, with metadata status and segments finalized.
+
+```bash
+docker build -t mumble-recorder:local .
+
+MSYS_NO_PATHCONV=1 docker run --rm \
+  --env-file .env.local \
+  -e RECORDING_MODE=continuous \
+  -e SEGMENT_DURATION_SECONDS=10 \
+  -e RECORDING_SECONDS=30 \
+  --mount type=bind,source="$REC_DIR",target=/recordings \
+  mumble-recorder:local
+```
+
+**Expected outcomes:**
+- Metadata `status=completed`
+- `stop_reason=duration_reached`
+- Wall duration close to 30 seconds
+- Metadata JSON file exists in recordings/
+- All segments are finalized (no partial segments)
+
+### Docker Stop Signal Validation
+
+Validates that SIGTERM from `docker stop` is handled gracefully, with accurate interruption metadata and segment finalization.
+
+**Terminal 1 — Start long-running recording:**
+
+```bash
+rm -rf recordings/*
+mkdir -p recordings
+REC_DIR="$(pwd | sed 's#^/c/#/mnt/c/#')/recordings"
+
+MSYS_NO_PATHCONV=1 docker run --rm --name mumble-recorder-test \
+  --env-file .env.local \
+  -e RECORDING_MODE=continuous \
+  -e SEGMENT_DURATION_SECONDS=10 \
+  -e RECORDING_SECONDS=60 \
+  --mount type=bind,source="$REC_DIR",target=/recordings \
+  mumble-recorder:local
+```
+
+**Terminal 2 — Stop the container after recording has started:**
+
+```bash
+docker stop --time=10 mumble-recorder-test
+```
+
+**Expected outcomes:**
+- Metadata `status=interrupted`
+- `stop_reason=signal_sigterm`
+- Actual wall duration less than planned 60 seconds
+- Current segment is finalized and playable
+- Metadata JSON file exists in recordings/
+
+### Inspect Recording Metadata
+
+```bash
+python - <<'PY'
+import json
+import glob
+from pathlib import Path
+
+metadata_files = sorted(
+    glob.glob("recordings/*_session_metadata.json"),
+    key=lambda x: Path(x).stat().st_mtime,
+    reverse=True,
+)
+if not metadata_files:
+    print("No metadata files found")
+else:
+    with open(metadata_files[0], encoding="utf-8") as f:
+        meta = json.load(f)
+
+    print(f"Status: {meta.get('status')}")
+    print(f"Stop reason: {meta.get('stop_reason')}")
+    print(f"Planned duration: {meta.get('planned_duration_seconds')}s")
+    print(f"Wall clock duration: {meta.get('wall_clock_duration_seconds'):.2f}s")
+    print(f"Audio duration: {meta.get('audio_duration_seconds'):.2f}s")
+    print(f"Number of segments: {len(meta.get('segments', []))}")
+    print(f"Segments: {[s.get('file_name') for s in meta.get('segments', [])]}")
+PY
+```
+
 ## Verify Recording
 
 ```bash
@@ -236,19 +333,29 @@ This pattern avoids ambiguity by embedding both the session start and segment st
 - Thread-safe audio callback
 - Support for short segment durations for testing
 
-## Spike Limitations & Troubleshooting
+## Limitations & Next Work
+
+### Troubleshooting
 
 **Audio path validation required:** If logs show "NO AUDIO CALLBACKS RECEIVED" or "NO AUDIO DATA RECEIVED", the audio path is not working. This is a blocker. Check:
 - Channel name matches exactly (case-sensitive)
 - Server has active speakers in that channel
 - Bot has permission to join and receive audio
 
-**Current implementation scope:**
-- Mixed channel audio only (no per-user tracks).
-- Single recording at a time.
-- No file retention, cleanup, or resume on restart.
-- No web UI yet.
-- **pymumble maintenance note:** usable for MVP, but maintenance risk documented for future investments.
+### Current Implementation Scope
+
+- Mixed channel audio only (no per-user tracks)
+- Single recording at a time
+- No file retention, cleanup, or resume on restart
+- No web UI yet
+- **pymumble maintenance note:** usable for MVP, but maintenance risk documented for future investments
+
+### Known Limitations
+
+**Mumble Disconnect Handling** (not yet implemented):
+- Unexpected Mumble disconnect during active recording is not explicitly detected or recovered.
+- Current behavior depends on pymumble behavior and may surface as callback starvation, connection errors, or process-level failure.
+- **Planned next slice:** Disconnect detection, interrupted session finalization, optional reconnect with new session or session split.
 
 ## Logs
 

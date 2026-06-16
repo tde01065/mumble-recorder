@@ -35,6 +35,9 @@ class SessionMetadata:
     audio_duration_seconds: float
     segment_duration_seconds: int
     segments: list[SegmentMetadata]
+    status: str = "completed"
+    stop_reason: str = "duration_reached"
+    planned_duration_seconds: int = 0
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""

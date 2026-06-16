@@ -1,5 +1,6 @@
 """Main recording orchestration."""
 import os
+import signal
 import time
 import logging
 import queue
@@ -42,6 +43,7 @@ class Recorder:
         # Audio queue: (monotonic_timestamp, pcm_bytes)
         self.audio_queue: queue.Queue = queue.Queue()
         self.stop_event = Event()
+        self.stop_reason = "duration_reached"
 
         # Segment management
         self.segments_metadata: list[SegmentMetadata] = []
@@ -49,6 +51,14 @@ class Recorder:
         self.current_segment_index: int = -1
 
         self.mumble = None
+
+    def _signal_handler(self, signum: int, frame) -> None:
+        """Lightweight signal handler: set event and reason only."""
+        if signum == signal.SIGTERM:
+            self.stop_reason = "signal_sigterm"
+        elif signum == signal.SIGINT:
+            self.stop_reason = "signal_sigint"
+        self.stop_event.set()
 
     def _log_config(self) -> None:
         logger.info("=== Recorder Configuration ===")
@@ -70,12 +80,14 @@ class Recorder:
             self._writer_loop()
         except Exception as e:
             logger.error(f"Writer thread error: {e}", exc_info=True)
+            self.stop_reason = "writer_error"
             self.stop_event.set()
 
     def _writer_loop(self) -> None:
         """Process the audio queue, rotate segments, and write to disk."""
         if self.session_start_monotonic is None:
             logger.error("session_start_monotonic not set")
+            self.stop_reason = "writer_error"
             return
 
         while not self.stop_event.is_set():
@@ -83,6 +95,7 @@ class Recorder:
 
             if elapsed_mono >= self.config.recording_seconds:
                 logger.info(f"Recording duration ({self.config.recording_seconds}s) reached")
+                self.stop_reason = "duration_reached"
                 break
 
             # Rotate segment when the elapsed-time bucket changes.
@@ -209,6 +222,10 @@ class Recorder:
         """Connect, record, disconnect. Returns True on success."""
         self._log_config()
 
+        # Register signal handlers for graceful shutdown.
+        signal.signal(signal.SIGTERM, self._signal_handler)
+        signal.signal(signal.SIGINT, self._signal_handler)
+
         self.mumble = connect_to_mumble(
             self.config.mumble_host,
             self.config.mumble_port,
@@ -217,11 +234,19 @@ class Recorder:
             self.config.mumble_connect_timeout_seconds,
         )
         if self.mumble is None:
+            self.stop_reason = "mumble_connection_failed"
+            self.session_stop_wall_clock = datetime.now(timezone.utc).astimezone()
+            self.session_stop_monotonic = time.monotonic()
+            self._create_session_metadata(is_failed=True)
             return False
 
         list_channels(self.mumble)
         if find_and_join_channel(self.mumble, self.config.mumble_channel) is None:
+            self.stop_reason = "channel_join_failed"
             self.mumble.stop()
+            self.session_stop_wall_clock = datetime.now(timezone.utc).astimezone()
+            self.session_stop_monotonic = time.monotonic()
+            self._create_session_metadata(is_failed=True)
             return False
 
         # Set session start timestamps here — after connect and channel join —
@@ -239,6 +264,10 @@ class Recorder:
         except ImportError:
             self.mumble.stop()
             logger.error("pymumble_py3 not available")
+            self.stop_reason = "writer_error"
+            self.session_stop_wall_clock = datetime.now(timezone.utc).astimezone()
+            self.session_stop_monotonic = time.monotonic()
+            self._create_session_metadata(is_failed=True)
             return False
 
         writer_thread = Thread(target=self._writer_thread_worker, daemon=False)
@@ -250,16 +279,21 @@ class Recorder:
         logger.info(f"Recording for {self.config.recording_seconds} seconds...")
         try:
             while time.monotonic() - self.session_start_monotonic < self.config.recording_seconds:
+                if self.stop_event.is_set():
+                    break
                 time.sleep(0.1)
         except KeyboardInterrupt:
             logger.info("Recording interrupted by user")
+            self.stop_reason = "keyboard_interrupt"
+            self.stop_event.set()
 
-        logger.info("Stopping recording...")
+        logger.info(f"Stopping recording (reason: {self.stop_reason})...")
 
         # Disable audio receive FIRST so no new callbacks can enqueue after
         # stop_event is set. The writer thread can then drain the queue cleanly.
         self.mumble.set_receive_sound(False)
-        self.stop_event.set()
+        if not self.stop_event.is_set():
+            self.stop_event.set()
         self.session_stop_monotonic = time.monotonic()
         writer_thread.join(timeout=10)
 
@@ -269,12 +303,17 @@ class Recorder:
         self.mumble.stop()
 
         self.session_stop_wall_clock = datetime.now(timezone.utc).astimezone()
-        self._create_session_metadata()
+
+        is_failed = self.stop_reason in ("writer_error", "mumble_connection_failed", "channel_join_failed")
+        is_interrupted = self.stop_reason in ("signal_sigterm", "signal_sigint", "keyboard_interrupt")
+        self._create_session_metadata(is_failed=is_failed, is_interrupted=is_interrupted)
 
         logger.info("Recording session completed")
-        return True
+        return not is_failed
 
-    def _create_session_metadata(self) -> None:
+    def _create_session_metadata(
+        self, is_failed: bool = False, is_interrupted: bool = False
+    ) -> None:
         start = self.session_start_wall_clock
         stop = self.session_stop_wall_clock
 
@@ -285,6 +324,13 @@ class Recorder:
             monotonic_duration = (stop - start).total_seconds() if start and stop else 0.0
 
         audio_duration = sum(s.audio_duration_seconds for s in self.segments_metadata)
+
+        if is_failed:
+            status = "failed"
+        elif is_interrupted:
+            status = "interrupted"
+        else:
+            status = "completed"
 
         meta = SessionMetadata(
             session_id=self.session_id,
@@ -303,6 +349,9 @@ class Recorder:
             audio_duration_seconds=audio_duration,
             segment_duration_seconds=self.config.segment_duration_seconds,
             segments=self.segments_metadata,
+            status=status,
+            stop_reason=self.stop_reason,
+            planned_duration_seconds=self.config.recording_seconds,
         )
 
         metadata_file = os.path.join(
@@ -316,5 +365,8 @@ class Recorder:
         logger.info(f"Segments: {len(self.segments_metadata)}")
         logger.info(f"Wall-clock duration: {monotonic_duration:.1f}s")
         logger.info(f"Total audio duration: {audio_duration:.1f}s")
+        logger.info(f"Status: {status}")
+        logger.info(f"Stop reason: {self.stop_reason}")
         logger.info(f"Mode: {self.config.recording_mode}")
         logger.info("=" * 30)
+

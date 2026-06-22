@@ -377,3 +377,37 @@ The spike logs all major steps:
 - **Success**: WAV file exists, contains PCM audio, is playable
 - **No audio**: Logs indicate if no audio callbacks were received or if no PCM payload was recorded
 - **File format**: WAV, 48 kHz, 16-bit signed, mono
+
+## Reconnect handling
+
+The recorder includes simple automatic reconnect handling for private/internal use.
+
+Default behavior:
+
+- Reconnect is enabled by default.
+- Reconnect is only attempted after `mumble_disconnected`.
+- SIGTERM, SIGINT, keyboard interrupt, writer errors, startup failures, and normal completion do not trigger reconnect.
+- Each reconnect starts a new recording session with new segment files.
+- Sessions from the same recorder invocation share a `recording_group_id`.
+- Reconnect sessions include `reconnect_attempt` and `parent_session_id` in metadata.
+- `RECORDING_SECONDS` is treated as total planned duration for the full recorder invocation, including reconnect wait time.
+
+Reconnect environment variables:
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `RECONNECT_ENABLED` | `true` | Enable reconnect after Mumble disconnect |
+| `RECONNECT_MAX_ATTEMPTS` | `10` | Maximum reconnect attempts per recorder invocation |
+| `RECONNECT_DELAY_SECONDS` | `5` | Delay before each reconnect attempt |
+
+Example environment:
+
+| Variable | Value |
+| --- | --- |
+| `RECORDING_SECONDS` | `240` |
+| `SEGMENT_DURATION_SECONDS` | `20` |
+| `RECONNECT_ENABLED` | `true` |
+| `RECONNECT_MAX_ATTEMPTS` | `10` |
+| `RECONNECT_DELAY_SECONDS` | `5` |
+
+Reconnect does not stitch audio across a disconnect. A network gap is represented by separate sessions rather than generated silence across the disconnect boundary.

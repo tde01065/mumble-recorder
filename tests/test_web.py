@@ -28,11 +28,13 @@ class TestWebApp(unittest.TestCase):
         self.assertEqual(data["status"], "ok")
 
     def test_recordings_empty(self):
-        """GET /api/recordings returns empty list when no sessions."""
+        """GET /api/recordings returns object when no sessions."""
         response = self.client.get("/api/recordings")
         self.assertEqual(response.status_code, 200)
         data = json.loads(response.data)
-        self.assertEqual(data, [])
+        self.assertEqual(data["items"], [])
+        self.assertEqual(data["page"], 1)
+        self.assertEqual(data["total_items"], 0)
 
     def test_recordings_sorted_newest_first(self):
         """GET /api/recordings returns sessions sorted newest first."""
@@ -72,10 +74,10 @@ class TestWebApp(unittest.TestCase):
         response = self.client.get("/api/recordings")
         self.assertEqual(response.status_code, 200)
         data = json.loads(response.data)
-        self.assertEqual(len(data), 2)
+        self.assertEqual(len(data["items"]), 2)
         # Newest first
-        self.assertEqual(data[0]["session_id"], "session2")
-        self.assertEqual(data[1]["session_id"], "session1")
+        self.assertEqual(data["items"][0]["session_id"], "session2")
+        self.assertEqual(data["items"][1]["session_id"], "session1")
 
     def test_recordings_includes_all_fields(self):
         """GET /api/recordings includes required fields."""
@@ -104,9 +106,9 @@ class TestWebApp(unittest.TestCase):
         response = self.client.get("/api/recordings")
         self.assertEqual(response.status_code, 200)
         data = json.loads(response.data)
-        self.assertEqual(len(data), 1)
+        self.assertEqual(len(data["items"]), 1)
 
-        item = data[0]
+        item = data["items"][0]
         self.assertEqual(item["session_id"], "test-id")
         self.assertEqual(item["session_short_id"], "t1")
         self.assertEqual(item["recording_group_id"], "group-1")
@@ -224,12 +226,391 @@ class TestWebApp(unittest.TestCase):
         response = self.client.get("/api/recordings")
         self.assertEqual(response.status_code, 200)
         data = json.loads(response.data)
-        self.assertEqual(len(data), 2)
+        self.assertEqual(len(data["items"]), 2)
 
         # Find the malformed one
-        malformed = [s for s in data if s["status"] == "error"]
+        malformed = [s for s in data["items"] if s["status"] == "error"]
         self.assertEqual(len(malformed), 1)
         self.assertIn("malformed", malformed[0]["stop_reason"])
+
+    def test_api_recordings_response_shape(self):
+        """GET /api/recordings returns object with pagination info."""
+        session = {
+            "session_id": "test1",
+            "channel_name": "test",
+            "recording_mode": "continuous",
+            "session_started_at_local": "2026-01-01 10:00:00",
+            "session_stopped_at_local": "2026-01-01 10:01:00",
+            "wall_clock_duration_seconds": 60,
+            "audio_duration_seconds": 60,
+            "segments": [],
+        }
+
+        path = Path(self.temp_dir.name) / "test_session_metadata.json"
+        with open(path, "w") as f:
+            json.dump(session, f)
+
+        response = self.client.get("/api/recordings")
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.data)
+
+        self.assertIn("items", data)
+        self.assertIn("page", data)
+        self.assertIn("page_size", data)
+        self.assertIn("total_items", data)
+        self.assertIn("total_pages", data)
+        self.assertIn("filters", data)
+
+        self.assertEqual(data["page"], 1)
+        self.assertEqual(data["page_size"], 25)
+        self.assertEqual(data["total_items"], 1)
+        self.assertEqual(data["total_pages"], 1)
+        self.assertEqual(len(data["items"]), 1)
+
+    def test_api_pagination_page_size(self):
+        """GET /api/recordings?page_size=2 paginates correctly."""
+        for i in range(5):
+            session = {
+                "session_id": f"session{i}",
+                "channel_name": "test",
+                "recording_mode": "continuous",
+                "session_started_at_local": f"2026-01-{i+1:02d} 10:00:00",
+                "session_stopped_at_local": f"2026-01-{i+1:02d} 10:01:00",
+                "wall_clock_duration_seconds": 60,
+                "audio_duration_seconds": 60,
+                "segments": [],
+            }
+            path = Path(self.temp_dir.name) / f"session{i}_session_metadata.json"
+            with open(path, "w") as f:
+                json.dump(session, f)
+
+        response = self.client.get("/api/recordings?page_size=2")
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.data)
+
+        self.assertEqual(data["page_size"], 2)
+        self.assertEqual(data["total_items"], 5)
+        self.assertEqual(data["total_pages"], 3)
+        self.assertEqual(len(data["items"]), 2)
+
+    def test_api_pagination_pages(self):
+        """GET /api/recordings?page=2&page_size=2 returns second page."""
+        for i in range(5):
+            session = {
+                "session_id": f"session{i}",
+                "channel_name": "test",
+                "recording_mode": "continuous",
+                "session_started_at_local": f"2026-01-{i+1:02d} 10:00:00",
+                "session_stopped_at_local": f"2026-01-{i+1:02d} 10:01:00",
+                "wall_clock_duration_seconds": 60,
+                "audio_duration_seconds": 60,
+                "segments": [],
+            }
+            path = Path(self.temp_dir.name) / f"session{i}_session_metadata.json"
+            with open(path, "w") as f:
+                json.dump(session, f)
+
+        response = self.client.get("/api/recordings?page=2&page_size=2")
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.data)
+
+        self.assertEqual(data["page"], 2)
+        self.assertEqual(len(data["items"]), 2)
+
+    def test_api_page_size_capped_at_100(self):
+        """GET /api/recordings?page_size=150 caps at 100."""
+        response = self.client.get("/api/recordings?page_size=150")
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.data)
+        self.assertEqual(data["page_size"], 100)
+
+    def test_api_page_size_too_small_capped_to_1(self):
+        """GET /api/recordings?page_size=0 normalizes to 1."""
+        response = self.client.get("/api/recordings?page_size=0")
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.data)
+        self.assertEqual(data["page_size"], 1)
+
+    def test_api_page_too_small_normalized_to_1(self):
+        """GET /api/recordings?page=0 normalizes to 1."""
+        response = self.client.get("/api/recordings?page=0")
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.data)
+        self.assertEqual(data["page"], 1)
+
+    def test_api_status_filter(self):
+        """GET /api/recordings?status=completed filters by status."""
+        session1 = {
+            "session_id": "session1",
+            "status": "completed",
+            "channel_name": "test",
+            "recording_mode": "continuous",
+            "session_started_at_local": "2026-01-01 10:00:00",
+            "session_stopped_at_local": "2026-01-01 10:01:00",
+            "wall_clock_duration_seconds": 60,
+            "audio_duration_seconds": 60,
+            "segments": [],
+        }
+        session2 = {
+            "session_id": "session2",
+            "status": "interrupted",
+            "channel_name": "test",
+            "recording_mode": "continuous",
+            "session_started_at_local": "2026-01-02 10:00:00",
+            "session_stopped_at_local": "2026-01-02 10:01:00",
+            "wall_clock_duration_seconds": 60,
+            "audio_duration_seconds": 60,
+            "segments": [],
+        }
+
+        path1 = Path(self.temp_dir.name) / "session1_session_metadata.json"
+        with open(path1, "w") as f:
+            json.dump(session1, f)
+
+        path2 = Path(self.temp_dir.name) / "session2_session_metadata.json"
+        with open(path2, "w") as f:
+            json.dump(session2, f)
+
+        response = self.client.get("/api/recordings?status=completed")
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.data)
+
+        self.assertEqual(data["total_items"], 1)
+        self.assertEqual(data["items"][0]["session_id"], "session1")
+        self.assertEqual(data["filters"]["status"], "completed")
+
+    def test_api_group_id_filter(self):
+        """GET /api/recordings?group_id=grp filters by group."""
+        session1 = {
+            "session_id": "session1",
+            "recording_group_id": "grp-1",
+            "channel_name": "test",
+            "recording_mode": "continuous",
+            "session_started_at_local": "2026-01-01 10:00:00",
+            "session_stopped_at_local": "2026-01-01 10:01:00",
+            "wall_clock_duration_seconds": 60,
+            "audio_duration_seconds": 60,
+            "segments": [],
+        }
+        session2 = {
+            "session_id": "session2",
+            "recording_group_id": "grp-2",
+            "channel_name": "test",
+            "recording_mode": "continuous",
+            "session_started_at_local": "2026-01-02 10:00:00",
+            "session_stopped_at_local": "2026-01-02 10:01:00",
+            "wall_clock_duration_seconds": 60,
+            "audio_duration_seconds": 60,
+            "segments": [],
+        }
+
+        path1 = Path(self.temp_dir.name) / "session1_session_metadata.json"
+        with open(path1, "w") as f:
+            json.dump(session1, f)
+
+        path2 = Path(self.temp_dir.name) / "session2_session_metadata.json"
+        with open(path2, "w") as f:
+            json.dump(session2, f)
+
+        response = self.client.get("/api/recordings?group_id=grp-1")
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.data)
+
+        self.assertEqual(data["total_items"], 1)
+        self.assertEqual(data["items"][0]["session_id"], "session1")
+        self.assertEqual(data["filters"]["group_id"], "grp-1")
+
+    def test_api_from_date_filter_date_only(self):
+        """GET /api/recordings?from=YYYY-MM-DD filters by date."""
+        session1 = {
+            "session_id": "session1",
+            "channel_name": "test",
+            "recording_mode": "continuous",
+            "session_started_at_local": "2026-01-01 10:00:00",
+            "session_stopped_at_local": "2026-01-01 10:01:00",
+            "wall_clock_duration_seconds": 60,
+            "audio_duration_seconds": 60,
+            "segments": [],
+        }
+        session2 = {
+            "session_id": "session2",
+            "channel_name": "test",
+            "recording_mode": "continuous",
+            "session_started_at_local": "2026-01-05 10:00:00",
+            "session_stopped_at_local": "2026-01-05 10:01:00",
+            "wall_clock_duration_seconds": 60,
+            "audio_duration_seconds": 60,
+            "segments": [],
+        }
+
+        path1 = Path(self.temp_dir.name) / "session1_session_metadata.json"
+        with open(path1, "w") as f:
+            json.dump(session1, f)
+
+        path2 = Path(self.temp_dir.name) / "session2_session_metadata.json"
+        with open(path2, "w") as f:
+            json.dump(session2, f)
+
+        response = self.client.get("/api/recordings?from=2026-01-03")
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.data)
+
+        self.assertEqual(data["total_items"], 1)
+        self.assertEqual(data["items"][0]["session_id"], "session2")
+
+    def test_api_to_date_filter_date_only(self):
+        """GET /api/recordings?to=YYYY-MM-DD filters by date (end of day)."""
+        session1 = {
+            "session_id": "session1",
+            "channel_name": "test",
+            "recording_mode": "continuous",
+            "session_started_at_local": "2026-01-01 10:00:00",
+            "session_stopped_at_local": "2026-01-01 10:01:00",
+            "wall_clock_duration_seconds": 60,
+            "audio_duration_seconds": 60,
+            "segments": [],
+        }
+        session2 = {
+            "session_id": "session2",
+            "channel_name": "test",
+            "recording_mode": "continuous",
+            "session_started_at_local": "2026-01-05 10:00:00",
+            "session_stopped_at_local": "2026-01-05 10:01:00",
+            "wall_clock_duration_seconds": 60,
+            "audio_duration_seconds": 60,
+            "segments": [],
+        }
+
+        path1 = Path(self.temp_dir.name) / "session1_session_metadata.json"
+        with open(path1, "w") as f:
+            json.dump(session1, f)
+
+        path2 = Path(self.temp_dir.name) / "session2_session_metadata.json"
+        with open(path2, "w") as f:
+            json.dump(session2, f)
+
+        response = self.client.get("/api/recordings?to=2026-01-03")
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.data)
+
+        self.assertEqual(data["total_items"], 1)
+        self.assertEqual(data["items"][0]["session_id"], "session1")
+
+    def test_api_date_filter_with_time(self):
+        """GET /api/recordings?from=YYYY-MM-DDTHH:MM accepts time format."""
+        session1 = {
+            "session_id": "session1",
+            "channel_name": "test",
+            "recording_mode": "continuous",
+            "session_started_at_local": "2026-01-01 08:00:00",
+            "session_stopped_at_local": "2026-01-01 09:00:00",
+            "wall_clock_duration_seconds": 60,
+            "audio_duration_seconds": 60,
+            "segments": [],
+        }
+        session2 = {
+            "session_id": "session2",
+            "channel_name": "test",
+            "recording_mode": "continuous",
+            "session_started_at_local": "2026-01-01 10:00:00",
+            "session_stopped_at_local": "2026-01-01 11:00:00",
+            "wall_clock_duration_seconds": 60,
+            "audio_duration_seconds": 60,
+            "segments": [],
+        }
+
+        path1 = Path(self.temp_dir.name) / "session1_session_metadata.json"
+        with open(path1, "w") as f:
+            json.dump(session1, f)
+
+        path2 = Path(self.temp_dir.name) / "session2_session_metadata.json"
+        with open(path2, "w") as f:
+            json.dump(session2, f)
+
+        response = self.client.get("/api/recordings?from=2026-01-01T09:00")
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.data)
+
+        self.assertEqual(data["total_items"], 1)
+        self.assertEqual(data["items"][0]["session_id"], "session2")
+
+    def test_api_invalid_date_returns_400(self):
+        """GET /api/recordings?from=invalid returns 400."""
+        response = self.client.get("/api/recordings?from=not-a-date")
+        self.assertEqual(response.status_code, 400)
+        data = json.loads(response.data)
+        self.assertIn("error", data)
+
+    def test_api_invalid_page_returns_400(self):
+        """GET /api/recordings?page=abc returns 400."""
+        response = self.client.get("/api/recordings?page=abc")
+        self.assertEqual(response.status_code, 400)
+        data = json.loads(response.data)
+        self.assertIn("error", data)
+
+    def test_ui_returns_200(self):
+        """GET / returns 200 with HTML."""
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Mumble Recordings", response.data)
+
+    def test_ui_contains_filter_form(self):
+        """GET / HTML contains filter form fields."""
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        html = response.data.decode()
+
+        self.assertIn('name="status"', html)
+        self.assertIn('name="from"', html)
+        self.assertIn('name="to"', html)
+        self.assertIn('name="group_id"', html)
+        self.assertIn('name="page_size"', html)
+
+    def test_ui_preserves_filters_in_form(self):
+        """GET /?status=completed preserves filter values in form."""
+        session = {
+            "session_id": "test1",
+            "status": "completed",
+            "channel_name": "test",
+            "recording_mode": "continuous",
+            "session_started_at_local": "2026-01-01 10:00:00",
+            "session_stopped_at_local": "2026-01-01 10:01:00",
+            "wall_clock_duration_seconds": 60,
+            "audio_duration_seconds": 60,
+            "segments": [],
+        }
+        path = Path(self.temp_dir.name) / "test_session_metadata.json"
+        with open(path, "w") as f:
+            json.dump(session, f)
+
+        response = self.client.get("/?status=completed&from=2026-01-01&group_id=grp1")
+        self.assertEqual(response.status_code, 200)
+        html = response.data.decode()
+
+        self.assertIn('selected', html)
+
+    def test_ui_shows_pagination_links(self):
+        """GET / with paginated results shows prev/next links."""
+        for i in range(30):
+            session = {
+                "session_id": f"session{i}",
+                "channel_name": "test",
+                "recording_mode": "continuous",
+                "session_started_at_local": f"2026-01-{(i % 28) + 1:02d} 10:00:00",
+                "session_stopped_at_local": f"2026-01-{(i % 28) + 1:02d} 10:01:00",
+                "wall_clock_duration_seconds": 60,
+                "audio_duration_seconds": 60,
+                "segments": [],
+            }
+            path = Path(self.temp_dir.name) / f"session{i}_session_metadata.json"
+            with open(path, "w") as f:
+                json.dump(session, f)
+
+        response = self.client.get("/?page_size=10")
+        self.assertEqual(response.status_code, 200)
+        html = response.data.decode()
+
+        self.assertIn("Next", html)
 
 
 if __name__ == "__main__":

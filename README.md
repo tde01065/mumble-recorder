@@ -29,6 +29,56 @@ Standalone headless Mumble recorder service. Records mixed channel audio to WAV.
 
 3. Ensure `.env.local` is in `.gitignore` and never committed (it contains secrets).
 
+## Docker Compose (Mumble VM Deployment)
+
+Run the recorder and web UI together on the same Proxmox VM as the Mumble server.
+
+### Setup
+
+1. Create recordings directory:
+   ```bash
+   mkdir -p recordings
+   ```
+
+2. Copy environment template and configure:
+   ```bash
+   cp .env.example .env.local
+   # Edit .env.local with your Mumble server details:
+   # - MUMBLE_HOST: LAN IP (e.g., 192.168.1.164) or Docker container name
+   # - MUMBLE_PASSWORD: if required
+   # - MUMBLE_CHANNEL: channel to record
+   ```
+
+3. Start services:
+   ```bash
+   docker compose up -d --build
+   ```
+
+### Verify Services
+
+```bash
+# View logs
+docker compose logs -f mumble-recorder
+
+# View web UI logs
+docker compose logs -f mumble-recorder-web
+```
+
+### Access Web UI
+
+Open browser: `http://<host-ip>:5000`
+
+### Stop Services
+
+```bash
+docker compose down
+```
+
+### Mumble Host Configuration
+
+- **Same network (LAN IP):** Set `MUMBLE_HOST=192.168.1.164` or your Mumble server IP
+- **Docker container:** Set `MUMBLE_HOST=<container-name>` and ensure both containers are on the same Docker network. You may need to add `networks:` configuration and update the compose file accordingly.
+
 ## Environment Variables
 
 | Variable | Default | Required | Notes |

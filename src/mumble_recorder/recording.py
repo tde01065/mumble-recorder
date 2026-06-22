@@ -27,10 +27,20 @@ logger = logging.getLogger(__name__)
 class Recorder:
     """Main recorder orchestration."""
 
-    def __init__(self, config: Config):
+    def __init__(
+        self,
+        config: Config,
+        recording_group_id: str | None = None,
+        reconnect_attempt: int = 0,
+        parent_session_id: str | None = None,
+    ):
         self.config = config
         self.session_id, self.session_short_id = generate_session_id()
         self.channel_slug = channel_to_slug(config.mumble_channel)
+
+        self.recording_group_id = recording_group_id
+        self.reconnect_attempt = reconnect_attempt
+        self.parent_session_id = parent_session_id
 
         # Set after channel join in run(), not at construction time.
         # Filenames and metadata reflect actual recording start.
@@ -368,6 +378,9 @@ class Recorder:
             status=status,
             stop_reason=self.stop_reason,
             planned_duration_seconds=self.config.recording_seconds,
+            recording_group_id=self.recording_group_id,
+            reconnect_attempt=self.reconnect_attempt,
+            parent_session_id=self.parent_session_id,
         )
 
         metadata_file = os.path.join(

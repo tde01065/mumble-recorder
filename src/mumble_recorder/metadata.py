@@ -38,6 +38,9 @@ class SessionMetadata:
     status: str = "completed"
     stop_reason: str = "duration_reached"
     planned_duration_seconds: int = 0
+    recording_group_id: str | None = None
+    reconnect_attempt: int | None = None
+    parent_session_id: str | None = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""

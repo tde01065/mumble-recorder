@@ -17,6 +17,9 @@ class Config:
     recording_mode: str
     segment_duration_seconds: int
     output_dir: str
+    reconnect_enabled: bool = True
+    reconnect_max_attempts: int = 10
+    reconnect_delay_seconds: int = 5
 
 
 def load_config() -> Config:
@@ -79,6 +82,33 @@ def load_config() -> Config:
 
     output_dir = os.getenv("OUTPUT_DIR", "/recordings")
 
+    try:
+        reconnect_enabled = os.getenv("RECONNECT_ENABLED", "true").lower() in ("true", "1", "yes")
+    except ValueError:
+        reconnect_enabled = True
+
+    try:
+        reconnect_max_attempts = int(os.getenv("RECONNECT_MAX_ATTEMPTS", "10"))
+        if reconnect_max_attempts < 0:
+            raise ValueError("must be >= 0")
+    except ValueError as e:
+        print(
+            f"ERROR: RECONNECT_MAX_ATTEMPTS must be non-negative integer, got '{os.getenv('RECONNECT_MAX_ATTEMPTS')}': {e}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        reconnect_delay = int(os.getenv("RECONNECT_DELAY_SECONDS", "5"))
+        if reconnect_delay < 0:
+            raise ValueError("must be >= 0")
+    except ValueError as e:
+        print(
+            f"ERROR: RECONNECT_DELAY_SECONDS must be non-negative integer, got '{os.getenv('RECONNECT_DELAY_SECONDS')}': {e}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     return Config(
         mumble_host=host,
         mumble_port=port,
@@ -90,4 +120,7 @@ def load_config() -> Config:
         recording_mode=mode,
         segment_duration_seconds=segment_duration,
         output_dir=output_dir,
+        reconnect_enabled=reconnect_enabled,
+        reconnect_max_attempts=reconnect_max_attempts,
+        reconnect_delay_seconds=reconnect_delay,
     )

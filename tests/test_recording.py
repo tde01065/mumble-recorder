@@ -2,6 +2,8 @@
 import signal
 import tempfile
 import unittest
+import time
+import json
 from unittest.mock import MagicMock, patch
 from datetime import datetime, timezone
 
@@ -22,6 +24,9 @@ def _mock_config(output_dir="/tmp"):
     config.segment_duration_seconds = 10
     config.recording_mode = "continuous"
     config.output_dir = output_dir
+    config.reconnect_enabled = True
+    config.reconnect_max_attempts = 10
+    config.reconnect_delay_seconds = 5
     return config
 
 
@@ -312,6 +317,192 @@ class TestCLIExitLogic(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertFalse(is_error)
 
+
+
+class TestReconnectConfig(unittest.TestCase):
+    """Test reconnect configuration defaults."""
+
+    def test_reconnect_enabled_default_true(self):
+        """Test reconnect_enabled defaults to True."""
+        from mumble_recorder.config import Config
+        self.assertTrue(Config.__dataclass_fields__["reconnect_enabled"].default)
+
+    def test_reconnect_max_attempts_default_10(self):
+        """Test RECONNECT_MAX_ATTEMPTS defaults to 10."""
+        from mumble_recorder.config import Config
+        config = MagicMock(spec=Config)
+        self.assertEqual(Config.__dataclass_fields__["reconnect_max_attempts"].default, 10)
+
+    def test_reconnect_delay_seconds_default_5(self):
+        """Test RECONNECT_DELAY_SECONDS defaults to 5."""
+        from mumble_recorder.config import Config
+        self.assertEqual(Config.__dataclass_fields__["reconnect_delay_seconds"].default, 5)
+
+
+class TestMetadataLinkageFields(unittest.TestCase):
+    """Test reconnect metadata linkage fields."""
+
+    def test_recorder_accepts_recording_group_id(self):
+        """Test Recorder accepts recording_group_id parameter."""
+        config = _mock_config()
+        group_id = "test-group-123"
+        recorder = Recorder(config, recording_group_id=group_id)
+        self.assertEqual(recorder.recording_group_id, group_id)
+
+    def test_recorder_accepts_reconnect_attempt(self):
+        """Test Recorder accepts reconnect_attempt parameter."""
+        config = _mock_config()
+        recorder = Recorder(config, reconnect_attempt=2)
+        self.assertEqual(recorder.reconnect_attempt, 2)
+
+    def test_recorder_accepts_parent_session_id(self):
+        """Test Recorder accepts parent_session_id parameter."""
+        config = _mock_config()
+        parent_id = "parent-session-abc"
+        recorder = Recorder(config, parent_session_id=parent_id)
+        self.assertEqual(recorder.parent_session_id, parent_id)
+
+    def test_initial_session_has_zero_reconnect_attempt(self):
+        """Test initial session has reconnect_attempt=0."""
+        config = _mock_config()
+        recorder = Recorder(config)
+        self.assertEqual(recorder.reconnect_attempt, 0)
+
+    def test_initial_session_has_no_parent_session_id(self):
+        """Test initial session has parent_session_id=None."""
+        config = _mock_config()
+        recorder = Recorder(config)
+        self.assertIsNone(recorder.parent_session_id)
+
+    def test_metadata_includes_linkage_fields(self):
+        """Test session metadata includes recording_group_id, reconnect_attempt, parent_session_id."""
+        config = _mock_config()
+        group_id = "test-group-456"
+        parent_id = "parent-session-def"
+        recorder = Recorder(config, recording_group_id=group_id, reconnect_attempt=1, parent_session_id=parent_id)
+        recorder.session_start_wall_clock = datetime.now(timezone.utc).astimezone()
+        recorder.session_stop_wall_clock = datetime.now(timezone.utc).astimezone()
+        recorder.session_start_monotonic = 100.0
+        recorder.session_stop_monotonic = 115.0
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder.config.output_dir = tmpdir
+            recorder._create_session_metadata()
+
+            self.assertIsNotNone(recorder.metadata_path)
+            with open(recorder.metadata_path, "r") as f:
+                import json
+                meta_dict = json.load(f)
+                self.assertEqual(meta_dict["recording_group_id"], group_id)
+                self.assertEqual(meta_dict["reconnect_attempt"], 1)
+                self.assertEqual(meta_dict["parent_session_id"], parent_id)
+
+
+class TestRemainingDurationCalculation(unittest.TestCase):
+    """Test remaining duration calculation for reconnect."""
+
+    def test_remaining_duration_from_cli_start(self):
+        """Test remaining duration is calculated from CLI start."""
+        from mumble_recorder.recording_cli import calculate_remaining_duration
+        cli_start = time.monotonic()
+        time.sleep(0.1)
+        remaining = calculate_remaining_duration(cli_start, 60)
+        self.assertLess(remaining, 60)
+        self.assertGreater(remaining, 58)
+
+    def test_remaining_duration_clamped_to_zero(self):
+        """Test remaining duration is never negative."""
+        from mumble_recorder.recording_cli import calculate_remaining_duration
+        cli_start = time.monotonic()
+        time.sleep(0.2)
+        remaining = calculate_remaining_duration(cli_start, 0)
+        self.assertEqual(remaining, 0)
+
+
+class TestReconnectDecision(unittest.TestCase):
+    """Test reconnect decision logic."""
+
+    def test_reconnect_true_for_interrupted_mumble_disconnected(self):
+        """Test should_reconnect returns True for interrupted/mumble_disconnected."""
+        from mumble_recorder.recording_cli import should_reconnect
+        config = _mock_config()
+        recorder = Recorder(config)
+        recorder.status = "interrupted"
+        recorder.stop_reason = "mumble_disconnected"
+        result = should_reconnect(recorder, 0, 10, 60)
+        self.assertTrue(result)
+
+    def test_reconnect_false_for_completed(self):
+        """Test should_reconnect returns False for completed."""
+        from mumble_recorder.recording_cli import should_reconnect
+        config = _mock_config()
+        recorder = Recorder(config)
+        recorder.status = "completed"
+        recorder.stop_reason = "duration_reached"
+        result = should_reconnect(recorder, 0, 10, 60)
+        self.assertFalse(result)
+
+    def test_reconnect_false_for_failed(self):
+        """Test should_reconnect returns False for failed."""
+        from mumble_recorder.recording_cli import should_reconnect
+        config = _mock_config()
+        recorder = Recorder(config)
+        recorder.status = "failed"
+        recorder.stop_reason = "mumble_connection_failed"
+        result = should_reconnect(recorder, 0, 10, 60)
+        self.assertFalse(result)
+
+    def test_reconnect_false_when_reconnect_disabled(self):
+        """Test should_reconnect returns False when reconnect_enabled=False."""
+        from mumble_recorder.recording_cli import should_reconnect
+        config = _mock_config()
+        config.reconnect_enabled = False
+        recorder = Recorder(config)
+        recorder.status = "interrupted"
+        recorder.stop_reason = "mumble_disconnected"
+        result = should_reconnect(recorder, 0, 10, 60)
+        self.assertFalse(result)
+
+    def test_reconnect_false_when_attempts_exhausted(self):
+        """Test should_reconnect returns False when max attempts reached."""
+        from mumble_recorder.recording_cli import should_reconnect
+        config = _mock_config()
+        config.reconnect_max_attempts = 3
+        recorder = Recorder(config)
+        recorder.status = "interrupted"
+        recorder.stop_reason = "mumble_disconnected"
+        result = should_reconnect(recorder, 3, 10, 60)
+        self.assertFalse(result)
+
+    def test_reconnect_false_when_no_time_remaining(self):
+        """Test should_reconnect returns False when no time remaining."""
+        from mumble_recorder.recording_cli import should_reconnect
+        config = _mock_config()
+        recorder = Recorder(config)
+        recorder.status = "interrupted"
+        recorder.stop_reason = "mumble_disconnected"
+        result = should_reconnect(recorder, 0, 60, 60)
+        self.assertFalse(result)
+
+    def test_reconnect_false_for_signal_sigterm(self):
+        """Test should_reconnect returns False for signal_sigterm."""
+        from mumble_recorder.recording_cli import should_reconnect
+        config = _mock_config()
+        recorder = Recorder(config)
+        recorder.status = "interrupted"
+        recorder.stop_reason = "signal_sigterm"
+        result = should_reconnect(recorder, 0, 10, 60)
+        self.assertFalse(result)
+
+    def test_reconnect_false_for_keyboard_interrupt(self):
+        """Test should_reconnect returns False for keyboard_interrupt."""
+        from mumble_recorder.recording_cli import should_reconnect
+        config = _mock_config()
+        recorder = Recorder(config)
+        recorder.status = "interrupted"
+        recorder.stop_reason = "keyboard_interrupt"
+        result = should_reconnect(recorder, 0, 10, 60)
+        self.assertFalse(result)
 
 
 if __name__ == "__main__":

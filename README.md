@@ -378,6 +378,45 @@ The spike logs all major steps:
 - **No audio**: Logs indicate if no audio callbacks were received or if no PCM payload was recorded
 - **File format**: WAV, 48 kHz, 16-bit signed, mono
 
+## Web UI and API
+
+A simple read-only web server can browse existing recordings without running the recorder.
+
+### Quick Start
+
+Build and run the web server:
+
+```bash
+docker build -t mumble-recorder:local .
+
+mkdir -p recordings
+REC_DIR="$(pwd | sed 's#^/c/#/mnt/c/#')/recordings"
+MSYS_NO_PATHCONV=1 docker run --rm \
+  -e OUTPUT_DIR=/recordings \
+  -e WEB_PORT=5000 \
+  -p 5000:5000 \
+  --mount type=bind,source="$REC_DIR",target=/recordings \
+  --entrypoint python \
+  mumble-recorder:local \
+  -m mumble_recorder.web
+```
+
+Then browse to `http://localhost:5000`.
+
+### API Endpoints
+
+- `GET /api/health` — Returns `{ "status": "ok" }`
+- `GET /api/recordings` — Lists all sessions (JSON), sorted newest first
+- `GET /api/recordings/<session_id>` — Full metadata for a session
+- `GET /api/files/<filename>` — Download a WAV segment or metadata JSON (path traversal prevented)
+
+### Environment Variables
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `OUTPUT_DIR` | `/recordings` | Directory containing recordings |
+| `WEB_PORT` | `5000` | Web server listen port |
+
 ## Reconnect handling
 
 The recorder includes simple automatic reconnect handling for private/internal use.

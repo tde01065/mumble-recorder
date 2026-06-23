@@ -5,6 +5,8 @@ import unittest
 import zipfile
 from io import BytesIO
 from pathlib import Path
+from subprocess import TimeoutExpired
+from unittest.mock import patch, MagicMock
 
 from mumble_recorder.web import create_app
 
@@ -942,6 +944,290 @@ class TestWebApp(unittest.TestCase):
             names = zf.namelist()
             self.assertIn("group-missing-seg/segments/found.wav", names)
             self.assertNotIn("notfound.wav", str(names))
+
+
+class TestRecorderControl(unittest.TestCase):
+    """Tests for recorder control API and UI."""
+
+    def setUp(self):
+        """Set up test app and temp directory."""
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.app = create_app(self.temp_dir.name)
+        self.client = self.app.test_client()
+
+    def tearDown(self):
+        """Clean up temp directory."""
+        self.temp_dir.cleanup()
+
+    def test_recorder_status_stopped(self):
+        """GET /api/recorder/status returns stopped status."""
+        response = self.client.get("/api/recorder/status")
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.data)
+
+        self.assertFalse(data["running"])
+        self.assertIsNone(data["pid"])
+        self.assertIsNone(data["started_at"])
+        self.assertIsNone(data["mode"])
+        self.assertIsNone(data["returncode"])
+
+    @patch("mumble_recorder.web.subprocess.Popen")
+    def test_recorder_status_detects_natural_exit(self, mock_popen):
+        """Status updates returncode and last_exit_at when process exits naturally."""
+        mock_process = MagicMock()
+        mock_process.pid = 1234
+        mock_process.poll.return_value = None
+        mock_process.stdout.readline.side_effect = [b"", b""]
+        mock_popen.return_value = mock_process
+
+        response = self.client.post(
+            "/api/recorder/start",
+            data={"recording_mode": "continuous"},
+        )
+        self.assertEqual(response.status_code, 200)
+
+        mock_process.poll.return_value = 1
+
+        response = self.client.get("/api/recorder/status")
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.data)
+
+        self.assertFalse(data["running"])
+        self.assertEqual(data["returncode"], 1)
+        self.assertIsNotNone(data["last_exit_at"])
+
+    @patch("mumble_recorder.web.subprocess.Popen")
+    def test_recorder_start_continuous(self, mock_popen):
+        """POST /api/recorder/start with continuous mode starts process."""
+        mock_process = MagicMock()
+        mock_process.pid = 1234
+        mock_process.poll.return_value = None
+        mock_process.stdout.readline.side_effect = [b"", b""]
+        mock_popen.return_value = mock_process
+
+        response = self.client.post(
+            "/api/recorder/start",
+            data={"recording_mode": "continuous"},
+        )
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.data)
+
+        self.assertTrue(data["running"])
+        self.assertEqual(data["pid"], 1234)
+        self.assertEqual(data["mode"], "continuous")
+        self.assertIsNotNone(data["started_at"])
+
+        mock_popen.assert_called_once()
+        call_args = mock_popen.call_args
+        self.assertIn("mumble_recorder", call_args[0][0])
+
+    @patch("mumble_recorder.web.subprocess.Popen")
+    def test_recorder_start_received_audio_only(self, mock_popen):
+        """POST /api/recorder/start with received_audio_only mode."""
+        mock_process = MagicMock()
+        mock_process.pid = 1234
+        mock_process.poll.return_value = None
+        mock_process.stdout.readline.side_effect = [b"", b""]
+        mock_popen.return_value = mock_process
+
+        response = self.client.post(
+            "/api/recorder/start",
+            data={"recording_mode": "received_audio_only"},
+        )
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.data)
+
+        self.assertTrue(data["running"])
+        self.assertEqual(data["mode"], "received_audio_only")
+
+        call_kwargs = mock_popen.call_args[1]
+        self.assertEqual(call_kwargs["env"]["RECORDING_MODE"], "received_audio_only")
+
+    @patch("mumble_recorder.web.subprocess.Popen")
+    def test_recorder_start_invalid_mode_returns_400(self, mock_popen):
+        """POST /api/recorder/start with invalid mode returns 400."""
+        response = self.client.post(
+            "/api/recorder/start",
+            data={"recording_mode": "invalid_mode"},
+        )
+        self.assertEqual(response.status_code, 400)
+        data = json.loads(response.data)
+        self.assertIn("Invalid recording mode", data["error"])
+
+    @patch("mumble_recorder.web.subprocess.Popen")
+    def test_recorder_start_already_running_returns_409(self, mock_popen):
+        """POST /api/recorder/start when already running returns 409."""
+        mock_process = MagicMock()
+        mock_process.pid = 1234
+        mock_process.poll.return_value = None
+        mock_process.stdout.readline.side_effect = [b"", b""]
+        mock_popen.return_value = mock_process
+
+        response1 = self.client.post(
+            "/api/recorder/start",
+            data={"recording_mode": "continuous"},
+        )
+        self.assertEqual(response1.status_code, 200)
+
+        response2 = self.client.post(
+            "/api/recorder/start",
+            data={"recording_mode": "continuous"},
+        )
+        self.assertEqual(response2.status_code, 409)
+        data = json.loads(response2.data)
+        self.assertIn("already running", data["error"])
+
+    @patch("mumble_recorder.web.subprocess.Popen")
+    def test_recorder_stop_when_running(self, mock_popen):
+        """POST /api/recorder/stop terminates running process."""
+        mock_process = MagicMock()
+        mock_process.pid = 1234
+        mock_process.returncode = None
+        mock_process.stdout.readline.side_effect = [b"", b""]
+        mock_popen.return_value = mock_process
+
+        # poll() returns None initially (running), then 0 after terminate
+        mock_process.poll.side_effect = [None, None, 0, 0, 0]
+        mock_process.wait.return_value = None
+
+        response1 = self.client.post(
+            "/api/recorder/start",
+            data={"recording_mode": "continuous"},
+        )
+        self.assertEqual(response1.status_code, 200)
+
+        mock_process.returncode = 0
+
+        response2 = self.client.post("/api/recorder/stop")
+        self.assertEqual(response2.status_code, 200)
+        data = json.loads(response2.data)
+
+        self.assertFalse(data["running"])
+        self.assertEqual(data["returncode"], 0)
+        self.assertIsNotNone(data["last_exit_at"])
+
+        mock_process.terminate.assert_called_once()
+
+    @patch("mumble_recorder.web.subprocess.Popen")
+    def test_recorder_stop_when_not_running_returns_409(self, mock_popen):
+        """POST /api/recorder/stop when not running returns 409."""
+        response = self.client.post("/api/recorder/stop")
+        self.assertEqual(response.status_code, 409)
+        data = json.loads(response.data)
+        self.assertIn("not running", data["error"])
+
+    @patch("mumble_recorder.web.subprocess.Popen")
+    def test_recorder_stop_sends_terminate_signal(self, mock_popen):
+        """POST /api/recorder/stop calls terminate() on process."""
+        mock_process = MagicMock()
+        mock_process.pid = 1234
+        mock_process.returncode = None
+        mock_process.stdout.readline.side_effect = [b"", b""]
+        mock_popen.return_value = mock_process
+
+        mock_process.poll.side_effect = [None, None, 0, 0, 0]
+        mock_process.wait.return_value = None
+
+        self.client.post(
+            "/api/recorder/start",
+            data={"recording_mode": "continuous"},
+        )
+
+        mock_process.returncode = 0
+
+        self.client.post("/api/recorder/stop")
+
+        mock_process.terminate.assert_called_once()
+
+    @patch("mumble_recorder.web.subprocess.Popen")
+    def test_recorder_stop_kills_if_timeout(self, mock_popen):
+        """POST /api/recorder/stop kills process if terminate times out."""
+        mock_process = MagicMock()
+        mock_process.pid = 1234
+        mock_process.returncode = None
+        mock_process.stdout.readline.side_effect = [b"", b""]
+        mock_popen.return_value = mock_process
+
+        mock_process.poll.side_effect = [None, None, 0, 0, 0]
+        mock_process.wait.side_effect = [TimeoutExpired("cmd", 10), None]
+        mock_process.returncode = -9
+
+        self.client.post(
+            "/api/recorder/start",
+            data={"recording_mode": "continuous"},
+        )
+
+        self.client.post("/api/recorder/stop")
+
+        mock_process.terminate.assert_called_once()
+        mock_process.kill.assert_called_once()
+
+    def test_ui_contains_recorder_control_panel(self):
+        """GET / HTML contains recorder control panel."""
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        html = response.data.decode()
+
+        self.assertIn("Recorder Control", html)
+        self.assertIn("recording_mode", html)
+        self.assertIn("Start Recording", html)
+        self.assertIn("When talking", html)
+        self.assertIn("Continuous", html)
+
+    def test_ui_has_recorder_status_display(self):
+        """GET / HTML includes recorder status elements."""
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        html = response.data.decode()
+
+        self.assertIn("recorder-status", html)
+        self.assertIn("recorder-details", html)
+        self.assertIn("loadRecorderStatus", html)
+
+    def test_ui_has_stop_button(self):
+        """GET / HTML includes stop button (hidden by default)."""
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        html = response.data.decode()
+
+        self.assertIn("Stop Recording", html)
+        self.assertIn("stopRecorder", html)
+
+    def test_recorder_start_with_json_content_type(self):
+        """POST /api/recorder/start accepts JSON body."""
+        with patch("mumble_recorder.web.subprocess.Popen") as mock_popen:
+            mock_process = MagicMock()
+            mock_process.pid = 1234
+            mock_process.poll.return_value = None
+            mock_process.stdout.readline.side_effect = [b"", b""]
+            mock_popen.return_value = mock_process
+
+            response = self.client.post(
+                "/api/recorder/start",
+                json={"recording_mode": "received_audio_only"},
+            )
+            self.assertEqual(response.status_code, 200)
+            data = json.loads(response.data)
+            self.assertTrue(data["running"])
+            self.assertEqual(data["mode"], "received_audio_only")
+
+    @patch("mumble_recorder.web.subprocess.Popen")
+    def test_recorder_status_includes_error_on_start_failure(self, mock_popen):
+        """Recorder status includes last_start_error when start fails."""
+        mock_popen.side_effect = RuntimeError("Connection refused")
+
+        response = self.client.post(
+            "/api/recorder/start",
+            data={"recording_mode": "continuous"},
+        )
+        self.assertEqual(response.status_code, 409)
+
+        response = self.client.get("/api/recorder/status")
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.data)
+
+        self.assertFalse(data["running"])
+        self.assertIn("Connection refused", data["last_start_error"])
 
 
 if __name__ == "__main__":

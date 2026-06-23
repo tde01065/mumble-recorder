@@ -31,7 +31,7 @@ Standalone headless Mumble recorder service. Records mixed channel audio to WAV.
 
 ## Docker Compose (Mumble VM Deployment)
 
-Run the recorder and web UI together on the same Proxmox VM as the Mumble server.
+Run the recorder web UI with built-in recorder control on the same Proxmox VM as the Mumble server. The web process manages the recorder subprocess, allowing start/stop control from the UI.
 
 ### Setup
 
@@ -49,19 +49,41 @@ Run the recorder and web UI together on the same Proxmox VM as the Mumble server
    # - MUMBLE_CHANNEL: channel to record
    ```
 
-3. Start services:
+3. Start web-controlled mode (default, recommended):
    ```bash
-   docker compose up -d --build
+   docker compose up -d --build mumble-recorder-web
    ```
+
+### Web-Controlled Mode
+
+The web UI allows you to start/stop recordings and select recording mode directly from the browser. The recorder runs as a child process inside the web container.
+
+- **Default deployment**: `docker compose up -d --build mumble-recorder-web`
+- **Access**: Open browser to `http://<host-ip>:5000`
+- **Recorder control**: Use the "Recorder Control" panel at the top of the page
+  - Select recording mode (Continuous or When talking)
+  - Click "Start Recording" to begin
+  - Click "Stop Recording" to stop (visible only when running)
+- **Recording history**: Browse completed recordings in the list below
+
+### Optional: Headless Mode (Continuous Recording)
+
+If you prefer the original headless recorder service (always recording), you can run it alongside the web UI:
+
+```bash
+docker compose --profile headless up -d --build
+```
+
+This starts both the web UI (port 5000) and a separate headless recorder service that begins recording immediately and continuously.
 
 ### Verify Services
 
 ```bash
 # View logs
-docker compose logs -f mumble-recorder
-
-# View web UI logs
 docker compose logs -f mumble-recorder-web
+
+# For headless mode, also view headless recorder:
+docker compose logs -f mumble-recorder
 ```
 
 ### Access Web UI
@@ -71,7 +93,11 @@ Open browser: `http://<host-ip>:5000`
 ### Stop Services
 
 ```bash
+# Stop web-controlled mode
 docker compose down
+
+# Stop headless mode (with both services)
+docker compose --profile headless down
 ```
 
 ### Mumble Host Configuration

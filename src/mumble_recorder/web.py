@@ -3,7 +3,10 @@ import io
 import json
 import logging
 import os
+import subprocess
 import sys
+import threading
+import time
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -197,6 +200,135 @@ def load_recordings(output_dir: str) -> list[dict]:
             })
 
     return sessions
+
+
+class RecorderController:
+    """Manages recorder subprocess lifecycle."""
+
+    def __init__(self, output_dir: str):
+        self.output_dir = output_dir
+        self.process = None
+        self.pid = None
+        self.started_at = None
+        self.mode = None
+        self.returncode = None
+        self.last_exit_at = None
+        self.last_start_error = None
+        self._lock = threading.Lock()
+
+    def status(self) -> dict:
+        """Return current recorder status."""
+        with self._lock:
+            polled_returncode = None
+            if self.process is not None:
+                polled_returncode = self.process.poll()
+                if polled_returncode is not None and (self.returncode is None or self.last_exit_at is None):
+                    self.returncode = polled_returncode
+                    self.last_exit_at = datetime.now().isoformat()
+
+            running = self.process is not None and polled_returncode is None
+
+            if running:
+                return {
+                    "running": True,
+                    "pid": self.pid,
+                    "started_at": self.started_at,
+                    "mode": self.mode,
+                    "returncode": None,
+                    "last_exit_at": None,
+                    "last_start_error": None,
+                }
+
+            return {
+                "running": False,
+                "pid": None,
+                "started_at": None,
+                "mode": None,
+                "returncode": self.returncode,
+                "last_exit_at": self.last_exit_at,
+                "last_start_error": self.last_start_error,
+            }
+
+    def start(self, mode: str | None = None) -> tuple[bool, str | None]:
+        """Start recorder subprocess.
+
+        Returns (success, error_message).
+        """
+        with self._lock:
+            if self.process is not None and self.process.poll() is None:
+                return False, "Recorder already running"
+
+            if mode is None:
+                mode = os.getenv("RECORDING_MODE", "continuous")
+
+            if mode not in ("continuous", "received_audio_only"):
+                return False, f"Invalid recording mode: {mode}"
+
+            try:
+                env = os.environ.copy()
+                env["RECORDING_MODE"] = mode
+                env["OUTPUT_DIR"] = self.output_dir
+
+                self.process = subprocess.Popen(
+                    [sys.executable, "-m", "mumble_recorder"],
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=False,
+                )
+
+                self.pid = self.process.pid
+                self.started_at = datetime.now().isoformat()
+                self.mode = mode
+                self.returncode = None
+                self.last_exit_at = None
+                self.last_start_error = None
+
+                threading.Thread(target=self._log_output, daemon=True).start()
+
+                return True, None
+            except Exception as e:
+                error = f"Failed to start recorder: {e}"
+                self.last_start_error = error
+                return False, error
+
+    def stop(self) -> tuple[bool, str | None]:
+        """Stop recorder subprocess gracefully."""
+        with self._lock:
+            if self.process is None or self.process.poll() is not None:
+                return False, "Recorder not running"
+
+            try:
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                    self.process.wait()
+
+                self.returncode = self.process.returncode
+                self.last_exit_at = datetime.now().isoformat()
+                return True, None
+            except Exception as e:
+                error = f"Failed to stop recorder: {e}"
+                return False, error
+
+    def _log_output(self):
+        """Log recorder stdout/stderr in background."""
+        if self.process is None:
+            return
+
+        try:
+            for line in iter(self.process.stdout.readline, b""):
+                if not line:
+                    break
+                try:
+                    msg = line.decode("utf-8", errors="replace").rstrip()
+                    logger.info(f"[recorder] {msg}")
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
 
 def is_allowed_recording_file(filename: str) -> bool:
@@ -396,10 +528,39 @@ def create_app(output_dir: str | None = None) -> Flask:
         output_dir = os.getenv("OUTPUT_DIR", "/recordings")
 
     output_path = Path(output_dir)
+    recorder_controller = RecorderController(output_dir)
 
     @app.route("/api/health", methods=["GET"])
     def health():
         return jsonify({"status": "ok"})
+
+    @app.route("/api/recorder/status", methods=["GET"])
+    def recorder_status():
+        return jsonify(recorder_controller.status())
+
+    @app.route("/api/recorder/start", methods=["POST"])
+    def recorder_start():
+        mode = None
+        if request.form:
+            mode = request.form.get("recording_mode")
+        elif request.is_json:
+            mode = request.get_json().get("recording_mode")
+
+        success, error = recorder_controller.start(mode)
+        if not success:
+            if error and "Invalid recording mode" in error:
+                return jsonify({"error": error}), 400
+            return jsonify({"error": error}), 409
+
+        return jsonify(recorder_controller.status())
+
+    @app.route("/api/recorder/stop", methods=["POST"])
+    def recorder_stop():
+        success, error = recorder_controller.stop()
+        if not success:
+            return jsonify({"error": error}), 409
+
+        return jsonify(recorder_controller.status())
 
     @app.route("/api/recordings", methods=["GET"])
     def get_recordings():
@@ -600,6 +761,12 @@ def create_app(output_dir: str | None = None) -> Flask:
     <style>
         body { font-family: sans-serif; margin: 20px; }
         h1 { color: #333; }
+        .recorder-panel { background-color: #f0f8ff; border: 1px solid #0066cc; padding: 15px; border-radius: 4px; margin-bottom: 20px; }
+        .recorder-status { padding: 10px; margin-bottom: 10px; background-color: white; border-radius: 3px; }
+        .status-running { color: green; font-weight: bold; }
+        .status-stopped { color: #666; font-weight: bold; }
+        .recorder-controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+        .control-section { display: flex; gap: 5px; align-items: center; }
         .filter-form { background-color: #f9f9f9; padding: 15px; border-radius: 4px; margin-bottom: 20px; }
         .filter-row { margin-bottom: 10px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
         .filter-group { display: flex; gap: 5px; align-items: center; }
@@ -607,6 +774,8 @@ def create_app(output_dir: str | None = None) -> Flask:
         input, select { padding: 5px; }
         button { padding: 6px 12px; background-color: #0066cc; color: white; border: none; border-radius: 3px; cursor: pointer; }
         button:hover { background-color: #0052a3; }
+        button.danger { background-color: #cc0000; }
+        button.danger:hover { background-color: #990000; }
         .clear-link { color: #0066cc; text-decoration: underline; cursor: pointer; margin-left: 10px; }
         table { width: 100%; border-collapse: collapse; margin-top: 20px; }
         th, td { padding: 8px; text-align: left; border-bottom: 1px solid #ddd; }
@@ -625,6 +794,87 @@ def create_app(output_dir: str | None = None) -> Flask:
 </head>
 <body>
     <h1>Mumble Recordings</h1>
+
+    <div class="recorder-panel">
+        <h2>Recorder Control</h2>
+        <div class="recorder-status">
+            <p>Status: <span id="recorder-status" class="status-stopped">—</span></p>
+            <p id="recorder-details" class="small">Loading...</p>
+        </div>
+        <div class="recorder-controls">
+            <form id="start-form" method="post" action="/api/recorder/start" style="display: flex; gap: 10px; align-items: center;">
+                <div class="control-section">
+                    <label for="recording_mode">Mode:</label>
+                    <select name="recording_mode" id="recording_mode">
+                        <option value="continuous">Continuous</option>
+                        <option value="received_audio_only">When talking</option>
+                    </select>
+                </div>
+                <button type="submit" id="start-btn">Start Recording</button>
+            </form>
+            <button type="button" id="stop-btn" onclick="stopRecorder()" style="display: none;" class="danger">Stop Recording</button>
+        </div>
+    </div>
+
+    <script>
+        function loadRecorderStatus() {
+            fetch('/api/recorder/status')
+                .then(r => r.json())
+                .then(data => {
+                    const statusEl = document.getElementById('recorder-status');
+                    const detailsEl = document.getElementById('recorder-details');
+                    const startBtn = document.getElementById('start-btn');
+                    const stopBtn = document.getElementById('stop-btn');
+                    const modeSelect = document.getElementById('recording_mode');
+
+                    if (data.running) {
+                        statusEl.textContent = 'Running';
+                        statusEl.className = 'status-running';
+                        startBtn.disabled = true;
+                        stopBtn.style.display = 'inline-block';
+                        modeSelect.disabled = true;
+                        detailsEl.textContent = `Mode: ${data.mode}, PID: ${data.pid}, Started: ${data.started_at}`;
+                    } else {
+                        statusEl.textContent = 'Stopped';
+                        statusEl.className = 'status-stopped';
+                        startBtn.disabled = false;
+                        stopBtn.style.display = 'none';
+                        modeSelect.disabled = false;
+                        let details = '';
+                        if (data.last_exit_at) {
+                            details = `Last exit: ${data.last_exit_at}, Return code: ${data.returncode}`;
+                        }
+                        if (data.last_start_error) {
+                            details = `Error: ${data.last_start_error}`;
+                        }
+                        detailsEl.textContent = details || '';
+                    }
+                });
+        }
+
+        function stopRecorder() {
+            if (confirm('Stop recording?')) {
+                fetch('/api/recorder/stop', {method: 'POST'})
+                    .then(r => r.json())
+                    .then(data => { loadRecorderStatus(); });
+            }
+        }
+
+        document.getElementById('start-form').addEventListener('submit', function(e) {
+            e.preventDefault();
+            const mode = document.getElementById('recording_mode').value;
+            fetch('/api/recorder/start', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                body: 'recording_mode=' + encodeURIComponent(mode)
+            })
+                .then(r => r.json())
+                .then(data => { loadRecorderStatus(); });
+        });
+
+        loadRecorderStatus();
+        setInterval(loadRecorderStatus, 5000);
+    </script>
 
     <div class="filter-form">
         <form method="get" action="/">

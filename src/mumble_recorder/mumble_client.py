@@ -71,12 +71,18 @@ def wait_until_ready(mumble, timeout_seconds: int) -> bool:
         result = result_queue.get(timeout=timeout_seconds)
         if isinstance(result, tuple) and result[0] == "error":
             logger.error(f"Connection check failed: {result[1]}")
-            mumble.stop()
+            try:
+                mumble.stop()
+            except Exception as e:
+                logger.error(f"Failed to stop Mumble after connection error: {e}")
             return False
         return True
     except queue.Empty:
         logger.error(f"Connection timeout after {timeout_seconds}s")
-        mumble.stop()
+        try:
+            mumble.stop()
+        except Exception as e:
+            logger.error(f"Failed to stop Mumble after timeout: {e}")
         return False
 
 
@@ -119,7 +125,10 @@ def connect_to_mumble(
 
     if not mumble.channels:
         logger.error("Connected but no channels available—server may have rejected connection")
-        mumble.stop()
+        try:
+            mumble.stop()
+        except Exception as e:
+            logger.error(f"Failed to stop Mumble after channel check: {e}")
         return None
 
     logger.info("Connected!")

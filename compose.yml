@@ -7,6 +7,7 @@ services:
     volumes:
       - ./recordings:/recordings
     restart: unless-stopped
+    profiles: ["headless"]
     logging:
       driver: "json-file"
       options:

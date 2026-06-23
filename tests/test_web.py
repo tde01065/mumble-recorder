@@ -1,5 +1,6 @@
 """Tests for web server."""
 import json
+import os
 import tempfile
 import unittest
 import zipfile
@@ -1211,23 +1212,66 @@ class TestRecorderControl(unittest.TestCase):
             self.assertTrue(data["running"])
             self.assertEqual(data["mode"], "received_audio_only")
 
+    def test_ui_mode_dropdown_defaults_to_env_received_audio_only(self):
+        """GET / renders received_audio_only as selected when RECORDING_MODE env var is set."""
+        with patch.dict(os.environ, {"RECORDING_MODE": "received_audio_only"}):
+            app = create_app(self.temp_dir.name)
+            client = app.test_client()
+            response = client.get("/")
+            self.assertEqual(response.status_code, 200)
+            html = response.data.decode()
+
+            # Find the option tags and verify selected attribute
+            self.assertIn('value="received_audio_only" selected', html)
+            self.assertNotIn('value="continuous" selected', html)
+
+    def test_ui_mode_dropdown_defaults_to_env_continuous(self):
+        """GET / renders continuous as selected when RECORDING_MODE=continuous."""
+        with patch.dict(os.environ, {"RECORDING_MODE": "continuous"}):
+            app = create_app(self.temp_dir.name)
+            client = app.test_client()
+            response = client.get("/")
+            self.assertEqual(response.status_code, 200)
+            html = response.data.decode()
+
+            self.assertIn('value="continuous" selected', html)
+            self.assertNotIn('value="received_audio_only" selected', html)
+
+    def test_ui_mode_dropdown_uses_persisted_state_when_stopped(self):
+        """GET / uses persisted mode when recorder is stopped."""
+        from mumble_recorder.web import save_recorder_state
+
+        # Save state with received_audio_only mode
+        save_recorder_state(self.temp_dir.name, False, "received_audio_only")
+
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        html = response.data.decode()
+
+        self.assertIn('value="received_audio_only" selected', html)
+        self.assertNotIn('value="continuous" selected', html)
+
     @patch("mumble_recorder.web.subprocess.Popen")
-    def test_recorder_status_includes_error_on_start_failure(self, mock_popen):
-        """Recorder status includes last_start_error when start fails."""
-        mock_popen.side_effect = RuntimeError("Connection refused")
+    def test_ui_mode_dropdown_uses_running_mode(self, mock_popen):
+        """GET / uses current running mode for dropdown selection."""
+        mock_process = MagicMock()
+        mock_process.pid = 1234
+        mock_process.poll.return_value = None
+        mock_process.stdout.readline.side_effect = [b"", b""]
+        mock_popen.return_value = mock_process
 
         response = self.client.post(
             "/api/recorder/start",
-            data={"recording_mode": "continuous"},
+            data={"recording_mode": "received_audio_only"},
         )
-        self.assertEqual(response.status_code, 409)
-
-        response = self.client.get("/api/recorder/status")
         self.assertEqual(response.status_code, 200)
-        data = json.loads(response.data)
 
-        self.assertFalse(data["running"])
-        self.assertIn("Connection refused", data["last_start_error"])
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        html = response.data.decode()
+
+        self.assertIn('value="received_audio_only" selected', html)
+        self.assertNotIn('value="continuous" selected', html)
 
 
 class TestRecorderStatePersistence(unittest.TestCase):

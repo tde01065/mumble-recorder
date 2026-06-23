@@ -370,6 +370,27 @@ class RecorderController:
             pass
 
 
+def get_default_recording_mode(recorder_status: dict | None = None, persisted_state: dict | None = None) -> str:
+    """Resolve the effective default recording mode.
+
+    Priority: running mode > persisted mode > env var > 'continuous'
+    """
+    if recorder_status and recorder_status.get("running") and recorder_status.get("mode"):
+        mode = recorder_status.get("mode")
+        if mode in ("continuous", "received_audio_only"):
+            return mode
+
+    if persisted_state and persisted_state.get("recording_mode"):
+        mode = persisted_state.get("recording_mode")
+        if mode in ("continuous", "received_audio_only"):
+            return mode
+
+    mode = os.getenv("RECORDING_MODE", "continuous")
+    if mode not in ("continuous", "received_audio_only"):
+        return "continuous"
+    return mode
+
+
 def is_allowed_recording_file(filename: str) -> bool:
     """Check if filename is allowed for download (wav or metadata json)."""
     return filename.endswith(".wav") or filename.endswith("_session_metadata.json")
@@ -807,6 +828,10 @@ def create_app(output_dir: str | None = None) -> Flask:
                 params["group_id"] = group_id
             return "&".join(f"{k}={v}" for k, v in params.items())
 
+        recorder_status = recorder_controller.status()
+        persisted_state = load_recorder_state(output_dir)
+        default_recording_mode = get_default_recording_mode(recorder_status, persisted_state)
+
         html = """
 <!DOCTYPE html>
 <html>
@@ -862,8 +887,8 @@ def create_app(output_dir: str | None = None) -> Flask:
                 <div class="control-section">
                     <label for="recording_mode">Mode:</label>
                     <select name="recording_mode" id="recording_mode">
-                        <option value="continuous">Continuous</option>
-                        <option value="received_audio_only">When talking</option>
+                        <option value="continuous"{% if default_recording_mode == 'continuous' %} selected{% endif %}>Continuous</option>
+                        <option value="received_audio_only"{% if default_recording_mode == 'received_audio_only' %} selected{% endif %}>When talking</option>
                     </select>
                 </div>
                 <button type="submit" id="start-btn">Start Recording</button>
@@ -1089,6 +1114,7 @@ def create_app(output_dir: str | None = None) -> Flask:
             prev_page=prev_page,
             next_page=next_page,
             build_query_string=build_query_string,
+            default_recording_mode=default_recording_mode,
             min=min,
         )
 

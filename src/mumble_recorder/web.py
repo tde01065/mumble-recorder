@@ -13,11 +13,46 @@ from pathlib import Path
 
 from flask import Flask, render_template_string, request, send_file, jsonify, url_for
 
+RECORDER_STATE_FILE = "recorder_control_state.json"
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+def load_recorder_state(output_dir: str) -> dict | None:
+    """Load persisted recorder control state from recordings directory.
+
+    Returns dict with desired_running, recording_mode, updated_at, or None if not found/invalid.
+    """
+    state_path = Path(output_dir) / RECORDER_STATE_FILE
+    if not state_path.exists():
+        return None
+
+    try:
+        with open(state_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError) as e:
+        logger.warning(f"Failed to load recorder state: {e}")
+        return None
+
+
+def save_recorder_state(output_dir: str, desired_running: bool, recording_mode: str) -> None:
+    """Save recorder control state to recordings directory."""
+    state_path = Path(output_dir) / RECORDER_STATE_FILE
+    state = {
+        "desired_running": desired_running,
+        "recording_mode": recording_mode,
+        "updated_at": datetime.utcnow().isoformat(),
+    }
+
+    try:
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2)
+    except IOError as e:
+        logger.warning(f"Failed to save recorder state: {e}")
 
 
 def parse_int_query_param(value: str | None, default: int, min_val: int | None = None, max_val: int | None = None) -> tuple[int, str | None]:
@@ -267,6 +302,7 @@ class RecorderController:
             try:
                 env = os.environ.copy()
                 env["RECORDING_MODE"] = mode
+                env["RECORDING_SECONDS"] = "0"
                 env["OUTPUT_DIR"] = self.output_dir
 
                 self.process = subprocess.Popen(
@@ -283,6 +319,8 @@ class RecorderController:
                 self.returncode = None
                 self.last_exit_at = None
                 self.last_start_error = None
+
+                save_recorder_state(self.output_dir, True, mode)
 
                 threading.Thread(target=self._log_output, daemon=True).start()
 
@@ -308,6 +346,7 @@ class RecorderController:
 
                 self.returncode = self.process.returncode
                 self.last_exit_at = datetime.now().isoformat()
+                save_recorder_state(self.output_dir, False, self.mode or "continuous")
                 return True, None
             except Exception as e:
                 error = f"Failed to stop recorder: {e}"
@@ -529,6 +568,23 @@ def create_app(output_dir: str | None = None) -> Flask:
 
     output_path = Path(output_dir)
     recorder_controller = RecorderController(output_dir)
+
+    def auto_resume_recorder():
+        """Auto-resume recorder if desired_running is true in persisted state."""
+        state = load_recorder_state(output_dir)
+        if state and state.get("desired_running"):
+            mode = state.get("recording_mode", "continuous")
+            logger.info(f"Auto-resuming recorder in {mode} mode (persisted state)")
+            time.sleep(0.5)
+            success, error = recorder_controller.start(mode)
+            if success:
+                logger.info("Auto-resume succeeded")
+            else:
+                logger.warning(f"Auto-resume failed: {error}")
+        else:
+            logger.info("No persisted recorder resume state or desired_running is false")
+
+    threading.Thread(target=auto_resume_recorder, daemon=True).start()
 
     @app.route("/api/health", methods=["GET"])
     def health():

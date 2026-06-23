@@ -113,7 +113,7 @@ class Recorder:
         while not self.stop_event.is_set():
             elapsed_mono = time.monotonic() - self.session_start_monotonic
 
-            if elapsed_mono >= self.config.recording_seconds:
+            if self.config.recording_seconds > 0 and elapsed_mono >= self.config.recording_seconds:
                 logger.info(f"Recording duration ({self.config.recording_seconds}s) reached")
                 self.stop_reason = "duration_reached"
                 break
@@ -302,9 +302,15 @@ class Recorder:
         logger.info("Enabling audio receive...")
         self.mumble.set_receive_sound(True)
 
-        logger.info(f"Recording for {self.config.recording_seconds} seconds...")
+        if self.config.recording_seconds > 0:
+            logger.info(f"Recording for {self.config.recording_seconds} seconds...")
+        else:
+            logger.info("Recording indefinitely until stopped...")
         try:
-            while time.monotonic() - self.session_start_monotonic < self.config.recording_seconds:
+            while True:
+                if self.config.recording_seconds > 0:
+                    if time.monotonic() - self.session_start_monotonic >= self.config.recording_seconds:
+                        break
                 if self.stop_event.is_set():
                     break
                 time.sleep(0.1)

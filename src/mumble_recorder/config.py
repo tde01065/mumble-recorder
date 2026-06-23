@@ -55,9 +55,11 @@ def load_config() -> Config:
 
     try:
         recording_seconds = int(os.getenv("RECORDING_SECONDS", "60"))
-    except ValueError:
+        if recording_seconds < 0:
+            raise ValueError("must be >= 0")
+    except ValueError as e:
         print(
-            f"ERROR: RECORDING_SECONDS must be integer, got '{os.getenv('RECORDING_SECONDS')}'",
+            f"ERROR: RECORDING_SECONDS must be non-negative integer, got '{os.getenv('RECORDING_SECONDS')}': {e}",
             file=sys.stderr,
         )
         sys.exit(1)

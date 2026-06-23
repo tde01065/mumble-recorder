@@ -60,6 +60,9 @@ The web UI allows you to start/stop recordings and select recording mode directl
 
 - **Default deployment**: `docker compose up -d --build mumble-recorder-web`
 - **Access**: Open browser to `http://<host-ip>:5000`
+- **Default behavior**: Recording is **unlimited duration** (records until you press Stop)
+  - If the web container restarts while recording was intended, it **automatically resumes** in the same mode
+  - Pressing Stop disables this auto-resume intent
 - **Recorder control**: Use the "Recorder Control" panel at the top of the page
   - Select recording mode (Continuous or When talking)
   - Click "Start Recording" to begin
@@ -114,7 +117,7 @@ docker compose --profile headless down
 | `MUMBLE_USERNAME` | `Recorder` | No | Bot display name in Mumble |
 | `MUMBLE_PASSWORD` | `` (empty) | No | Server password if required |
 | `MUMBLE_CHANNEL` | - | Yes | Channel name to join and record |
-| `RECORDING_SECONDS` | `60` | No | Duration to record in seconds |
+| `RECORDING_SECONDS` | `0` | No | Duration to record in seconds (0=unlimited/until stopped) |
 | `MUMBLE_CONNECT_TIMEOUT_SECONDS` | `30` | No | Max seconds to wait for connection |
 | `OUTPUT_DIR` | `/recordings` | No | Output directory for recording segments (inside container) |
 | `RECORDING_MODE` | `continuous` | No | Recording mode: `continuous` or `received_audio_only` |

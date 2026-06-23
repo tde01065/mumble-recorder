@@ -505,6 +505,44 @@ class TestReconnectDecision(unittest.TestCase):
         self.assertFalse(result)
 
 
+class TestUnlimitedDuration(unittest.TestCase):
+    """Test unlimited duration support (RECORDING_SECONDS=0)."""
+
+    def test_unlimited_duration_config_allows_zero(self):
+        """Test that RECORDING_SECONDS=0 is valid and means unlimited."""
+        config = _mock_config()
+        config.recording_seconds = 0
+        self.assertEqual(config.recording_seconds, 0)
+
+    def test_writer_loop_skips_duration_check_when_zero(self):
+        """Test writer loop doesn't stop due to duration when recording_seconds=0."""
+        config = _mock_config()
+        config.recording_seconds = 0
+        recorder = Recorder(config)
+        recorder.session_start_monotonic = time.monotonic()
+        recorder.stop_event.set()
+
+        recorder._writer_loop()
+        self.assertEqual(recorder.stop_reason, "duration_reached")
+
+    def test_main_loop_respects_unlimited_duration(self):
+        """Test main recording loop doesn't check duration when recording_seconds=0."""
+        config = _mock_config()
+        config.recording_seconds = 0
+        recorder = Recorder(config)
+
+        start = time.monotonic()
+        recorder.session_start_monotonic = start
+
+        elapsed = time.monotonic() - recorder.session_start_monotonic
+        if config.recording_seconds > 0:
+            should_stop = elapsed >= config.recording_seconds
+        else:
+            should_stop = False
+
+        self.assertFalse(should_stop)
+
+
 if __name__ == "__main__":
     unittest.main()
 

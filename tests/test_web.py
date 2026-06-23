@@ -1230,5 +1230,130 @@ class TestRecorderControl(unittest.TestCase):
         self.assertIn("Connection refused", data["last_start_error"])
 
 
+class TestRecorderStatePersistence(unittest.TestCase):
+    """Tests for recorder control state persistence and auto-resume."""
+
+    def setUp(self):
+        """Set up test app and temp directory."""
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.app = create_app(self.temp_dir.name)
+        self.client = self.app.test_client()
+
+    def tearDown(self):
+        """Clean up temp directory."""
+        self.temp_dir.cleanup()
+
+    @patch("mumble_recorder.web.subprocess.Popen")
+    def test_recorder_start_saves_state(self, mock_popen):
+        """Starting recorder saves desired_running=true and mode to state file."""
+        from mumble_recorder.web import load_recorder_state
+        mock_process = MagicMock()
+        mock_process.pid = 1234
+        mock_process.poll.return_value = None
+        mock_process.stdout.readline.side_effect = [b"", b""]
+        mock_popen.return_value = mock_process
+
+        response = self.client.post(
+            "/api/recorder/start",
+            data={"recording_mode": "continuous"},
+        )
+        self.assertEqual(response.status_code, 200)
+
+        state = load_recorder_state(self.temp_dir.name)
+        self.assertIsNotNone(state)
+        self.assertTrue(state["desired_running"])
+        self.assertEqual(state["recording_mode"], "continuous")
+        self.assertIn("updated_at", state)
+
+    @patch("mumble_recorder.web.subprocess.Popen")
+    def test_recorder_start_with_received_audio_only_saves_mode(self, mock_popen):
+        """Starting with received_audio_only mode saves the mode to state."""
+        from mumble_recorder.web import load_recorder_state
+        mock_process = MagicMock()
+        mock_process.pid = 1234
+        mock_process.poll.return_value = None
+        mock_process.stdout.readline.side_effect = [b"", b""]
+        mock_popen.return_value = mock_process
+
+        response = self.client.post(
+            "/api/recorder/start",
+            data={"recording_mode": "received_audio_only"},
+        )
+        self.assertEqual(response.status_code, 200)
+
+        state = load_recorder_state(self.temp_dir.name)
+        self.assertTrue(state["desired_running"])
+        self.assertEqual(state["recording_mode"], "received_audio_only")
+
+    @patch("mumble_recorder.web.subprocess.Popen")
+    def test_recorder_stop_saves_desired_running_false(self, mock_popen):
+        """Stopping recorder saves desired_running=false to state file."""
+        from mumble_recorder.web import load_recorder_state
+        mock_process = MagicMock()
+        mock_process.pid = 1234
+        mock_process.returncode = None
+        mock_process.stdout.readline.side_effect = [b"", b""]
+        mock_popen.return_value = mock_process
+
+        mock_process.poll.side_effect = [None, None, 0, 0, 0]
+        mock_process.wait.return_value = None
+
+        self.client.post(
+            "/api/recorder/start",
+            data={"recording_mode": "continuous"},
+        )
+
+        mock_process.returncode = 0
+
+        response = self.client.post("/api/recorder/stop")
+        self.assertEqual(response.status_code, 200)
+
+        state = load_recorder_state(self.temp_dir.name)
+        self.assertFalse(state["desired_running"])
+
+    @patch("mumble_recorder.web.subprocess.Popen")
+    def test_recorder_start_sets_recording_seconds_to_zero(self, mock_popen):
+        """Web start sets RECORDING_SECONDS=0 (unlimited) in child env."""
+        mock_process = MagicMock()
+        mock_process.pid = 1234
+        mock_process.poll.return_value = None
+        mock_process.stdout.readline.side_effect = [b"", b""]
+        mock_popen.return_value = mock_process
+
+        response = self.client.post(
+            "/api/recorder/start",
+            data={"recording_mode": "continuous"},
+        )
+        self.assertEqual(response.status_code, 200)
+
+        call_kwargs = mock_popen.call_args[1]
+        self.assertEqual(call_kwargs["env"]["RECORDING_SECONDS"], "0")
+
+    def test_load_recorder_state_returns_none_if_no_file(self):
+        """load_recorder_state returns None when state file doesn't exist."""
+        from mumble_recorder.web import load_recorder_state
+        state = load_recorder_state(self.temp_dir.name)
+        self.assertIsNone(state)
+
+    def test_load_recorder_state_returns_none_on_invalid_json(self):
+        """load_recorder_state returns None for malformed JSON."""
+        from mumble_recorder.web import load_recorder_state
+        state_path = Path(self.temp_dir.name) / "recorder_control_state.json"
+        state_path.write_text("{invalid json")
+
+        state = load_recorder_state(self.temp_dir.name)
+        self.assertIsNone(state)
+
+    def test_save_recorder_state_creates_json_file(self):
+        """save_recorder_state creates a valid JSON file."""
+        from mumble_recorder.web import save_recorder_state, load_recorder_state
+        save_recorder_state(self.temp_dir.name, True, "continuous")
+
+        state = load_recorder_state(self.temp_dir.name)
+        self.assertIsNotNone(state)
+        self.assertTrue(state["desired_running"])
+        self.assertEqual(state["recording_mode"], "continuous")
+
+
 if __name__ == "__main__":
     unittest.main()

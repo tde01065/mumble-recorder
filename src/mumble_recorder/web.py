@@ -1,8 +1,10 @@
 """Web UI and API server for recordings."""
+import io
 import json
 import logging
 import os
 import sys
+import zipfile
 from datetime import datetime
 from pathlib import Path
 
@@ -197,6 +199,195 @@ def load_recordings(output_dir: str) -> list[dict]:
     return sessions
 
 
+def is_allowed_recording_file(filename: str) -> bool:
+    """Check if filename is allowed for download (wav or metadata json)."""
+    return filename.endswith(".wav") or filename.endswith("_session_metadata.json")
+
+
+def safe_output_file(output_path: Path, filename: str) -> Path | None:
+    """Resolve filename safely, ensuring it stays under output_path.
+
+    Returns None if the file is outside output_path or invalid.
+    """
+    if ".." in filename or "/" in filename or "\\" in filename:
+        return None
+
+    if not is_allowed_recording_file(filename):
+        return None
+
+    file_path = output_path / filename
+
+    try:
+        file_path.resolve().relative_to(output_path.resolve())
+        return file_path
+    except ValueError:
+        return None
+
+
+def load_full_metadata_for_session(output_dir: str, session_id: str) -> dict | None:
+    """Load full metadata for a specific session.
+
+    Returns None if not found or malformed.
+    """
+    output_path = Path(output_dir)
+
+    if not output_path.exists():
+        return None
+
+    try:
+        metadata_files = output_path.glob("*_session_metadata.json")
+    except OSError:
+        return None
+
+    for metadata_file in metadata_files:
+        try:
+            with open(metadata_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            if data.get("session_id") == session_id:
+                return data
+        except (json.JSONDecodeError, IOError):
+            continue
+
+    return None
+
+
+def find_metadata_for_group(output_dir: str, recording_group_id: str) -> list[tuple[dict, str]]:
+    """Find all metadata for sessions in a group.
+
+    Returns list of (session_metadata, metadata_filename) tuples.
+    Malformed files are skipped with warning.
+    """
+    sessions = []
+    output_path = Path(output_dir)
+
+    if not output_path.exists():
+        return sessions
+
+    try:
+        metadata_files = output_path.glob("*_session_metadata.json")
+    except OSError:
+        return sessions
+
+    for metadata_file in metadata_files:
+        try:
+            with open(metadata_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            if data.get("recording_group_id") == recording_group_id:
+                sessions.append((data, metadata_file.name))
+        except (json.JSONDecodeError, IOError) as e:
+            logger.warning(f"Skipping malformed metadata in group ZIP: {metadata_file.name}: {e}")
+            continue
+
+    return sessions
+
+
+def build_zip_for_session(output_dir: str, session_id: str) -> io.BytesIO | None:
+    """Build in-memory ZIP for a single session.
+
+    Returns BytesIO object or None if session not found.
+    Skips missing segment files with warning.
+    """
+    metadata = load_full_metadata_for_session(output_dir, session_id)
+    if metadata is None:
+        return None
+
+    output_path = Path(output_dir)
+    zip_buffer = io.BytesIO()
+
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        # Add metadata file
+        try:
+            metadata_file = None
+            for mf in output_path.glob("*_session_metadata.json"):
+                with open(mf, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if data.get("session_id") == session_id:
+                    metadata_file = mf
+                    break
+
+            if metadata_file:
+                zf.write(metadata_file, arcname=f"metadata/{metadata_file.name}")
+        except (json.JSONDecodeError, IOError, OSError) as e:
+            logger.warning(f"Failed to add metadata to session ZIP: {e}")
+
+        # Add segment files
+        for segment in metadata.get("segments", []):
+            filename = segment.get("file_name")
+            if not filename:
+                continue
+
+            file_path = safe_output_file(output_path, filename)
+            if file_path is None:
+                logger.warning(f"Skipping unsafe segment filename in session ZIP: {filename}")
+                continue
+
+            if not file_path.exists():
+                logger.warning(f"Skipping missing segment file in session ZIP: {filename}")
+                continue
+
+            try:
+                zf.write(file_path, arcname=f"segments/{filename}")
+            except (IOError, OSError) as e:
+                logger.warning(f"Failed to add segment {filename} to session ZIP: {e}")
+
+    zip_buffer.seek(0)
+    return zip_buffer
+
+
+def build_zip_for_group(output_dir: str, recording_group_id: str) -> io.BytesIO | None:
+    """Build in-memory ZIP for all sessions in a group.
+
+    Returns BytesIO object or None if group not found.
+    Skips missing segment files and malformed sessions with warnings.
+    """
+    sessions = find_metadata_for_group(output_dir, recording_group_id)
+    if not sessions:
+        return None
+
+    output_path = Path(output_dir)
+    zip_buffer = io.BytesIO()
+
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for metadata, metadata_filename in sessions:
+            session_id = metadata.get("session_id")
+            if not session_id:
+                logger.warning("Skipping session without session_id in group ZIP")
+                continue
+
+            # Add metadata file
+            try:
+                file_path = safe_output_file(output_path, metadata_filename)
+                if file_path and file_path.exists():
+                    zf.write(file_path, arcname=f"{session_id}/metadata/{metadata_filename}")
+            except (IOError, OSError) as e:
+                logger.warning(f"Failed to add metadata for session {session_id} to group ZIP: {e}")
+
+            # Add segment files
+            for segment in metadata.get("segments", []):
+                filename = segment.get("file_name")
+                if not filename:
+                    continue
+
+                file_path = safe_output_file(output_path, filename)
+                if file_path is None:
+                    logger.warning(f"Skipping unsafe segment filename in group ZIP: {filename}")
+                    continue
+
+                if not file_path.exists():
+                    logger.warning(f"Skipping missing segment file in group ZIP: {filename}")
+                    continue
+
+                try:
+                    zf.write(file_path, arcname=f"{session_id}/segments/{filename}")
+                except (IOError, OSError) as e:
+                    logger.warning(f"Failed to add segment {filename} to group ZIP: {e}")
+
+    zip_buffer.seek(0)
+    return zip_buffer
+
+
 def create_app(output_dir: str | None = None) -> Flask:
     """Create and configure Flask app."""
     app = Flask(__name__)
@@ -306,6 +497,42 @@ def create_app(output_dir: str | None = None) -> Flask:
             file_path,
             as_attachment=True,
             download_name=filename,
+        )
+
+    @app.route("/api/recordings/<session_id>/download.zip", methods=["GET"])
+    def download_session_zip(session_id: str):
+        """Download ZIP file for a single session."""
+        zip_buffer = build_zip_for_session(output_dir, session_id)
+        if zip_buffer is None:
+            return jsonify({"error": "not found"}), 404
+
+        if zip_buffer.getbuffer().nbytes == 0:
+            return jsonify({"error": "no files to download"}), 404
+
+        return send_file(
+            zip_buffer,
+            mimetype="application/zip",
+            as_attachment=True,
+            download_name=f"recording-{session_id}.zip",
+        )
+
+    @app.route("/api/groups/<recording_group_id>/download.zip", methods=["GET"])
+    def download_group_zip(recording_group_id: str):
+        """Download ZIP file for all sessions in a group."""
+        zip_buffer = build_zip_for_group(output_dir, recording_group_id)
+        if zip_buffer is None:
+            return jsonify({"error": "not found"}), 404
+
+        if zip_buffer.getbuffer().nbytes == 0:
+            return jsonify({"error": "no files to download"}), 404
+
+        # Use short ID in filename
+        short_id = recording_group_id[:8]
+        return send_file(
+            zip_buffer,
+            mimetype="application/zip",
+            as_attachment=True,
+            download_name=f"recording-group-{short_id}.zip",
         )
 
     @app.route("/", methods=["GET"])
@@ -502,7 +729,11 @@ def create_app(output_dir: str | None = None) -> Flask:
                     </td>
                     <td class="small">{{ session.recording_group_id_short or "—" }}</td>
                     <td>
-                        <a href="/api/files/{{ session.metadata_filename }}">metadata</a>
+                        <a href="/api/recordings/{{ session.session_id }}/download.zip">session.zip</a>
+                        {% if session.recording_group_id %}
+                            <br><a href="/api/groups/{{ session.recording_group_id }}/download.zip">group.zip</a>
+                        {% endif %}
+                        <br><a href="/api/files/{{ session.metadata_filename }}">metadata</a>
                         {% for segment in session.segments[:3] %}
                             {% if loop.first %}<br>{% endif %}
                             <a href="/api/files/{{ segment.file_name }}">wav{{ loop.index }}</a>

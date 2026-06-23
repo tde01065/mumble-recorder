@@ -2,6 +2,8 @@
 import json
 import tempfile
 import unittest
+import zipfile
+from io import BytesIO
 from pathlib import Path
 
 from mumble_recorder.web import create_app
@@ -611,6 +613,335 @@ class TestWebApp(unittest.TestCase):
         html = response.data.decode()
 
         self.assertIn("Next", html)
+
+    def test_session_zip_returns_200(self):
+        """GET /api/recordings/<session_id>/download.zip returns 200 with zip content."""
+        session = {
+            "session_id": "zip-test",
+            "session_short_id": "zt",
+            "channel_name": "test",
+            "recording_mode": "continuous",
+            "session_started_at_local": "2026-01-01 10:00:00",
+            "session_stopped_at_local": "2026-01-01 10:01:00",
+            "wall_clock_duration_seconds": 60,
+            "audio_duration_seconds": 60,
+            "segments": [
+                {"segment_index": 0, "file_name": "segment1.wav", "size_bytes": 100},
+            ],
+        }
+
+        meta_path = Path(self.temp_dir.name) / "zip_session_metadata.json"
+        with open(meta_path, "w") as f:
+            json.dump(session, f)
+
+        seg_path = Path(self.temp_dir.name) / "segment1.wav"
+        seg_path.write_bytes(b"WAV_DATA_HERE")
+
+        response = self.client.get("/api/recordings/zip-test/download.zip")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content_type, "application/zip")
+
+    def test_session_zip_contains_metadata_and_segments(self):
+        """Session ZIP contains metadata JSON and segment WAV files."""
+        session = {
+            "session_id": "content-test",
+            "channel_name": "test",
+            "recording_mode": "continuous",
+            "session_started_at_local": "2026-01-01 10:00:00",
+            "session_stopped_at_local": "2026-01-01 10:01:00",
+            "wall_clock_duration_seconds": 60,
+            "audio_duration_seconds": 60,
+            "segments": [
+                {"segment_index": 0, "file_name": "seg0.wav", "size_bytes": 100},
+                {"segment_index": 1, "file_name": "seg1.wav", "size_bytes": 100},
+            ],
+        }
+
+        meta_path = Path(self.temp_dir.name) / "content_session_metadata.json"
+        with open(meta_path, "w") as f:
+            json.dump(session, f)
+
+        (Path(self.temp_dir.name) / "seg0.wav").write_bytes(b"SEG0")
+        (Path(self.temp_dir.name) / "seg1.wav").write_bytes(b"SEG1")
+
+        response = self.client.get("/api/recordings/content-test/download.zip")
+        self.assertEqual(response.status_code, 200)
+
+        zip_data = BytesIO(response.data)
+        with zipfile.ZipFile(zip_data) as zf:
+            names = zf.namelist()
+            self.assertIn("metadata/content_session_metadata.json", names)
+            self.assertIn("segments/seg0.wav", names)
+            self.assertIn("segments/seg1.wav", names)
+
+            # Verify content
+            meta_content = zf.read("metadata/content_session_metadata.json")
+            meta_json = json.loads(meta_content)
+            self.assertEqual(meta_json["session_id"], "content-test")
+
+            seg_content = zf.read("segments/seg0.wav")
+            self.assertEqual(seg_content, b"SEG0")
+
+    def test_session_zip_skips_missing_segments(self):
+        """Session ZIP skips missing segment files without failing."""
+        session = {
+            "session_id": "missing-seg-test",
+            "channel_name": "test",
+            "recording_mode": "continuous",
+            "session_started_at_local": "2026-01-01 10:00:00",
+            "session_stopped_at_local": "2026-01-01 10:01:00",
+            "wall_clock_duration_seconds": 60,
+            "audio_duration_seconds": 60,
+            "segments": [
+                {"segment_index": 0, "file_name": "exists.wav", "size_bytes": 100},
+                {"segment_index": 1, "file_name": "missing.wav", "size_bytes": 100},
+            ],
+        }
+
+        meta_path = Path(self.temp_dir.name) / "missing_seg_session_metadata.json"
+        with open(meta_path, "w") as f:
+            json.dump(session, f)
+
+        (Path(self.temp_dir.name) / "exists.wav").write_bytes(b"EXISTS")
+
+        response = self.client.get("/api/recordings/missing-seg-test/download.zip")
+        self.assertEqual(response.status_code, 200)
+
+        zip_data = BytesIO(response.data)
+        with zipfile.ZipFile(zip_data) as zf:
+            names = zf.namelist()
+            self.assertIn("segments/exists.wav", names)
+            self.assertNotIn("segments/missing.wav", names)
+
+    def test_session_zip_returns_404_for_missing_session(self):
+        """GET /api/recordings/<session_id>/download.zip returns 404 if missing."""
+        response = self.client.get("/api/recordings/nonexistent/download.zip")
+        self.assertEqual(response.status_code, 404)
+        data = json.loads(response.data)
+        self.assertEqual(data["error"], "not found")
+
+    def test_session_zip_rejects_unsafe_filenames(self):
+        """Session ZIP rejects unsafe segment filenames (path traversal, etc)."""
+        session = {
+            "session_id": "unsafe-test",
+            "channel_name": "test",
+            "recording_mode": "continuous",
+            "session_started_at_local": "2026-01-01 10:00:00",
+            "session_stopped_at_local": "2026-01-01 10:01:00",
+            "wall_clock_duration_seconds": 60,
+            "audio_duration_seconds": 60,
+            "segments": [
+                {"segment_index": 0, "file_name": "../etc/passwd", "size_bytes": 100},
+                {"segment_index": 1, "file_name": "good.wav", "size_bytes": 100},
+            ],
+        }
+
+        meta_path = Path(self.temp_dir.name) / "unsafe_session_metadata.json"
+        with open(meta_path, "w") as f:
+            json.dump(session, f)
+
+        (Path(self.temp_dir.name) / "good.wav").write_bytes(b"GOOD")
+
+        response = self.client.get("/api/recordings/unsafe-test/download.zip")
+        self.assertEqual(response.status_code, 200)
+
+        zip_data = BytesIO(response.data)
+        with zipfile.ZipFile(zip_data) as zf:
+            names = zf.namelist()
+            self.assertNotIn("../etc/passwd", names)
+            self.assertIn("segments/good.wav", names)
+
+    def test_group_zip_returns_200(self):
+        """GET /api/groups/<group_id>/download.zip returns 200."""
+        session1 = {
+            "session_id": "group-session-1",
+            "recording_group_id": "group-123",
+            "channel_name": "test",
+            "recording_mode": "continuous",
+            "session_started_at_local": "2026-01-01 10:00:00",
+            "session_stopped_at_local": "2026-01-01 10:01:00",
+            "wall_clock_duration_seconds": 60,
+            "audio_duration_seconds": 60,
+            "segments": [
+                {"segment_index": 0, "file_name": "g1_seg.wav", "size_bytes": 100},
+            ],
+        }
+
+        meta_path = Path(self.temp_dir.name) / "group_session1_session_metadata.json"
+        with open(meta_path, "w") as f:
+            json.dump(session1, f)
+
+        (Path(self.temp_dir.name) / "g1_seg.wav").write_bytes(b"G1SEG")
+
+        response = self.client.get("/api/groups/group-123/download.zip")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content_type, "application/zip")
+
+    def test_group_zip_includes_all_sessions_in_group(self):
+        """Group ZIP includes metadata and segments for all sessions in group."""
+        session1 = {
+            "session_id": "g2-session-1",
+            "recording_group_id": "group-456",
+            "channel_name": "test",
+            "recording_mode": "continuous",
+            "session_started_at_local": "2026-01-01 10:00:00",
+            "session_stopped_at_local": "2026-01-01 10:01:00",
+            "wall_clock_duration_seconds": 60,
+            "audio_duration_seconds": 60,
+            "segments": [{"segment_index": 0, "file_name": "g2s1.wav", "size_bytes": 100}],
+        }
+        session2 = {
+            "session_id": "g2-session-2",
+            "recording_group_id": "group-456",
+            "channel_name": "test",
+            "recording_mode": "continuous",
+            "session_started_at_local": "2026-01-02 10:00:00",
+            "session_stopped_at_local": "2026-01-02 10:01:00",
+            "wall_clock_duration_seconds": 60,
+            "audio_duration_seconds": 60,
+            "segments": [{"segment_index": 0, "file_name": "g2s2.wav", "size_bytes": 100}],
+        }
+
+        meta_path1 = Path(self.temp_dir.name) / "g2s1_session_metadata.json"
+        with open(meta_path1, "w") as f:
+            json.dump(session1, f)
+
+        meta_path2 = Path(self.temp_dir.name) / "g2s2_session_metadata.json"
+        with open(meta_path2, "w") as f:
+            json.dump(session2, f)
+
+        (Path(self.temp_dir.name) / "g2s1.wav").write_bytes(b"G2S1")
+        (Path(self.temp_dir.name) / "g2s2.wav").write_bytes(b"G2S2")
+
+        response = self.client.get("/api/groups/group-456/download.zip")
+        self.assertEqual(response.status_code, 200)
+
+        zip_data = BytesIO(response.data)
+        with zipfile.ZipFile(zip_data) as zf:
+            names = zf.namelist()
+            self.assertIn("g2-session-1/metadata/g2s1_session_metadata.json", names)
+            self.assertIn("g2-session-1/segments/g2s1.wav", names)
+            self.assertIn("g2-session-2/metadata/g2s2_session_metadata.json", names)
+            self.assertIn("g2-session-2/segments/g2s2.wav", names)
+
+    def test_group_zip_excludes_other_groups(self):
+        """Group ZIP does not include sessions from other groups."""
+        session1 = {
+            "session_id": "session-a",
+            "recording_group_id": "group-a",
+            "channel_name": "test",
+            "recording_mode": "continuous",
+            "session_started_at_local": "2026-01-01 10:00:00",
+            "session_stopped_at_local": "2026-01-01 10:01:00",
+            "wall_clock_duration_seconds": 60,
+            "audio_duration_seconds": 60,
+            "segments": [{"segment_index": 0, "file_name": "a.wav", "size_bytes": 100}],
+        }
+        session2 = {
+            "session_id": "session-b",
+            "recording_group_id": "group-b",
+            "channel_name": "test",
+            "recording_mode": "continuous",
+            "session_started_at_local": "2026-01-02 10:00:00",
+            "session_stopped_at_local": "2026-01-02 10:01:00",
+            "wall_clock_duration_seconds": 60,
+            "audio_duration_seconds": 60,
+            "segments": [{"segment_index": 0, "file_name": "b.wav", "size_bytes": 100}],
+        }
+
+        meta_path1 = Path(self.temp_dir.name) / "s_a_session_metadata.json"
+        with open(meta_path1, "w") as f:
+            json.dump(session1, f)
+
+        meta_path2 = Path(self.temp_dir.name) / "s_b_session_metadata.json"
+        with open(meta_path2, "w") as f:
+            json.dump(session2, f)
+
+        (Path(self.temp_dir.name) / "a.wav").write_bytes(b"A")
+        (Path(self.temp_dir.name) / "b.wav").write_bytes(b"B")
+
+        response = self.client.get("/api/groups/group-a/download.zip")
+        self.assertEqual(response.status_code, 200)
+
+        zip_data = BytesIO(response.data)
+        with zipfile.ZipFile(zip_data) as zf:
+            names = zf.namelist()
+            self.assertIn("session-a/metadata/s_a_session_metadata.json", names)
+            self.assertIn("session-a/segments/a.wav", names)
+            # session-b should not be in the zip
+            self.assertNotIn("session-b", str(names))
+
+    def test_group_zip_returns_404_for_missing_group(self):
+        """GET /api/groups/<group_id>/download.zip returns 404 if missing."""
+        response = self.client.get("/api/groups/nonexistent-group/download.zip")
+        self.assertEqual(response.status_code, 404)
+        data = json.loads(response.data)
+        self.assertEqual(data["error"], "not found")
+
+    def test_group_zip_skips_malformed_metadata(self):
+        """Group ZIP skips malformed session metadata without crashing."""
+        valid_session = {
+            "session_id": "valid-in-group",
+            "recording_group_id": "mixed-group",
+            "channel_name": "test",
+            "recording_mode": "continuous",
+            "session_started_at_local": "2026-01-01 10:00:00",
+            "session_stopped_at_local": "2026-01-01 10:01:00",
+            "wall_clock_duration_seconds": 60,
+            "audio_duration_seconds": 60,
+            "segments": [{"segment_index": 0, "file_name": "valid.wav", "size_bytes": 100}],
+        }
+
+        meta_path = Path(self.temp_dir.name) / "valid_group_session_metadata.json"
+        with open(meta_path, "w") as f:
+            json.dump(valid_session, f)
+
+        # Create a malformed metadata file with same group_id
+        malformed_path = Path(self.temp_dir.name) / "malformed_group_session_metadata.json"
+        malformed_path.write_text('{"recording_group_id": "mixed-group", "invalid": json}')
+
+        (Path(self.temp_dir.name) / "valid.wav").write_bytes(b"VALID")
+
+        response = self.client.get("/api/groups/mixed-group/download.zip")
+        self.assertEqual(response.status_code, 200)
+
+        zip_data = BytesIO(response.data)
+        with zipfile.ZipFile(zip_data) as zf:
+            names = zf.namelist()
+            self.assertIn("valid-in-group/metadata/valid_group_session_metadata.json", names)
+            self.assertIn("valid-in-group/segments/valid.wav", names)
+
+    def test_group_zip_skips_missing_segments(self):
+        """Group ZIP skips missing segment files without failing."""
+        session = {
+            "session_id": "group-missing-seg",
+            "recording_group_id": "group-missing",
+            "channel_name": "test",
+            "recording_mode": "continuous",
+            "session_started_at_local": "2026-01-01 10:00:00",
+            "session_stopped_at_local": "2026-01-01 10:01:00",
+            "wall_clock_duration_seconds": 60,
+            "audio_duration_seconds": 60,
+            "segments": [
+                {"segment_index": 0, "file_name": "found.wav", "size_bytes": 100},
+                {"segment_index": 1, "file_name": "notfound.wav", "size_bytes": 100},
+            ],
+        }
+
+        meta_path = Path(self.temp_dir.name) / "grp_missing_session_metadata.json"
+        with open(meta_path, "w") as f:
+            json.dump(session, f)
+
+        (Path(self.temp_dir.name) / "found.wav").write_bytes(b"FOUND")
+
+        response = self.client.get("/api/groups/group-missing/download.zip")
+        self.assertEqual(response.status_code, 200)
+
+        zip_data = BytesIO(response.data)
+        with zipfile.ZipFile(zip_data) as zf:
+            names = zf.namelist()
+            self.assertIn("group-missing-seg/segments/found.wav", names)
+            self.assertNotIn("notfound.wav", str(names))
 
 
 if __name__ == "__main__":

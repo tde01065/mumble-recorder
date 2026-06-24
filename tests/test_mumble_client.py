@@ -239,3 +239,76 @@ class TestGetChannelUsers(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TestGetChannelUsersCollections(unittest.TestCase):
+    """Robust channel.get_users() collection handling."""
+
+    def test_get_channel_users_handles_dict_return(self):
+        from unittest.mock import Mock
+        from mumble_recorder.mumble_client import get_channel_users
+
+        user = Mock()
+        user.get_property.return_value = "Tobias"
+
+        channel = Mock()
+        channel.get_users.return_value = {1: user}
+
+        self.assertEqual(get_channel_users(channel), ["Tobias"])
+
+    def test_get_channel_users_handles_list_return(self):
+        from unittest.mock import Mock
+        from mumble_recorder.mumble_client import get_channel_users
+
+        user1 = Mock()
+        user1.get_property.return_value = "RecorderBot"
+        user2 = Mock()
+        user2.get_property.return_value = "Tobias"
+
+        channel = Mock()
+        channel.get_users.return_value = [user1, user2]
+
+        self.assertEqual(get_channel_users(channel), ["RecorderBot", "Tobias"])
+
+    def test_get_channel_users_handles_name_attribute(self):
+        from unittest.mock import Mock
+        from mumble_recorder.mumble_client import get_channel_users
+
+        user = Mock()
+        user.get_property.side_effect = AttributeError("no get_property")
+        user.name = "Hanna"
+
+        channel = Mock()
+        channel.get_users.return_value = [user]
+
+        self.assertEqual(get_channel_users(channel), ["Hanna"])
+
+    def test_get_channel_users_handles_dict_like_user(self):
+        from mumble_recorder.mumble_client import get_channel_users
+
+        class Channel:
+            def get_users(self):
+                return [{"name": "Tobias"}]
+
+        self.assertEqual(get_channel_users(Channel()), ["Tobias"])
+
+    def test_get_channel_users_deduplicates_names(self):
+        from mumble_recorder.mumble_client import get_channel_users
+
+        class User:
+            def __init__(self, name):
+                self.name = name
+
+        class Channel:
+            def get_users(self):
+                return [User("Tobias"), User("Tobias"), User("RecorderBot")]
+
+        self.assertEqual(get_channel_users(Channel()), ["Tobias", "RecorderBot"])
+
+    def test_get_channel_users_returns_empty_on_lookup_failure(self):
+        from mumble_recorder.mumble_client import get_channel_users
+
+        class BrokenChannel:
+            def get_users(self):
+                raise RuntimeError("boom")
+
+        self.assertEqual(get_channel_users(BrokenChannel()), [])

@@ -176,40 +176,125 @@ def find_and_join_channel(
         return None
 
 
+def _iter_user_collection(users: Any) -> list[Any]:
+    """Normalize pymumble channel user collections to a list."""
+    if not users:
+        return []
+
+    if hasattr(users, "values"):
+        try:
+            return list(users.values())
+        except Exception:
+            pass
+
+    try:
+        return list(users)
+    except TypeError:
+        return [users]
+
+
+def _clean_user_name(value: Any) -> str | None:
+    """Return a useful user display name, avoiding noisy mock/object reprs."""
+    if value is None:
+        return None
+
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+
+    if isinstance(value, str):
+        value = value.strip()
+        return value or None
+
+    return None
+
+
+def _extract_user_name(user: Any) -> str | None:
+    """Extract a useful display name from common pymumble user shapes."""
+    if user is None:
+        return None
+
+    # pyMumble-style object.
+    get_property = getattr(user, "get_property", None)
+    if callable(get_property):
+        for key in ("name", "username"):
+            try:
+                name = _clean_user_name(get_property(key))
+                if name:
+                    return name
+            except Exception:
+                pass
+
+    # dict/dict-like. Avoid accepting arbitrary Mock/object reprs as names.
+    if isinstance(user, dict):
+        for key in ("name", "username"):
+            try:
+                name = _clean_user_name(user.get(key))
+                if name:
+                    return name
+            except Exception:
+                pass
+    else:
+        get_value = getattr(user, "get", None)
+        if callable(get_value) and type(user).__module__ != "unittest.mock":
+            for key in ("name", "username"):
+                try:
+                    name = _clean_user_name(get_value(key))
+                    if name:
+                        return name
+                except Exception:
+                    pass
+
+    # Plain object attribute.
+    for attr in ("name", "username"):
+        try:
+            name = _clean_user_name(getattr(user, attr, None))
+            if name:
+                return name
+        except Exception:
+            pass
+
+    # Last useful fallback: session id if available.
+    if callable(get_property):
+        try:
+            session = get_property("session")
+            if isinstance(session, (str, int)):
+                return f"session:{session}"
+        except Exception:
+            pass
+
+    try:
+        session = getattr(user, "session", None)
+        if isinstance(session, (str, int)):
+            return f"session:{session}"
+    except Exception:
+        pass
+
+    return None
+
+
 def get_channel_users(channel: Any) -> list[str]:
     """Get list of user names in a channel.
 
-    Returns list of display names or usernames. If extraction fails, logs warning
-    and returns empty list rather than raising.
+    Handles both dict-like and list-like pymumble get_users() return values.
+    Returns a stable, de-duplicated list of display names/usernames.
+    If extraction fails, logs a warning and returns [] rather than raising.
     """
     if not channel:
         return []
 
     try:
         users = channel.get_users()
-        if not users:
-            return []
+        user_names: list[str] = []
+        seen: set[str] = set()
 
-        user_names = []
-        for user in users.values():
-            if user is None:
+        for user in _iter_user_collection(users):
+            name = _extract_user_name(user)
+            if not name:
                 continue
 
-            # Try display name first, fall back to name
-            try:
-                if hasattr(user, "get_property"):
-                    name = user.get_property("name")
-                elif hasattr(user, "get"):
-                    name = user.get("name")
-                elif hasattr(user, "name"):
-                    name = user.name
-                else:
-                    name = None
-
-                if name:
-                    user_names.append(name)
-            except (AttributeError, KeyError):
-                pass
+            if name not in seen:
+                seen.add(name)
+                user_names.append(name)
 
         return user_names
     except Exception as e:

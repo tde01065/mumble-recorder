@@ -1,11 +1,13 @@
 """Main recording orchestration."""
 import os
+import json
 import signal
 import time
 import logging
 import queue
 from datetime import datetime, timezone, timedelta
 from threading import Thread, Event
+from pathlib import Path
 
 from mumble_recorder.config import Config
 from mumble_recorder.filenames import (
@@ -18,6 +20,8 @@ from mumble_recorder.mumble_client import (
     connect_to_mumble,
     list_channels,
     find_and_join_channel,
+    get_channel_name,
+    get_channel_users,
 )
 from mumble_recorder.wav_writer import SegmentWriter
 
@@ -65,6 +69,8 @@ class Recorder:
         self.metadata_path: str | None = None
 
         self.mumble = None
+        self.channel = None
+        self.runtime_status_path = Path(config.output_dir) / "recorder_runtime_status.json"
 
     def _signal_handler(self, signum: int, frame) -> None:
         """Lightweight signal handler: set event and reason only."""
@@ -79,6 +85,40 @@ class Recorder:
         if self.stop_reason == "duration_reached":
             self.stop_reason = "mumble_disconnected"
         self.stop_event.set()
+
+    def _write_runtime_status(self, running: bool = True) -> None:
+        """Write or update runtime status JSON file."""
+        if self.session_start_monotonic is None:
+            return
+
+        try:
+            elapsed_wall = datetime.now(timezone.utc).astimezone()
+            elapsed_mono = time.monotonic() - self.session_start_monotonic
+            audio_duration = sum(s.audio_duration_seconds for s in self.segments_metadata)
+            # Include active segment's current audio duration if it's still open
+            if self.current_segment is not None:
+                audio_duration += self.current_segment.get_accumulated_audio_duration()
+
+            channel_users = []
+            if self.channel:
+                channel_users = get_channel_users(self.channel)
+
+            status = {
+                "running": running,
+                "session_id": self.session_id,
+                "recording_group_id": self.recording_group_id,
+                "recording_mode": self.config.recording_mode,
+                "channel_name": self.config.mumble_channel,
+                "channel_users": channel_users,
+                "wall_clock_duration_seconds": elapsed_mono,
+                "audio_duration_seconds": audio_duration,
+                "updated_at_local": elapsed_wall.strftime("%Y-%m-%d %H:%M:%S"),
+                "updated_at_utc": elapsed_wall.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+            }
+
+            self.runtime_status_path.write_text(json.dumps(status, indent=2), encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"Failed to write runtime status: {e}")
 
     def _log_config(self) -> None:
         logger.info("=== Recorder Configuration ===")
@@ -110,6 +150,8 @@ class Recorder:
             self.stop_reason = "writer_error"
             return
 
+        last_runtime_status_update = 0
+
         while not self.stop_event.is_set():
             elapsed_mono = time.monotonic() - self.session_start_monotonic
 
@@ -126,6 +168,12 @@ class Recorder:
                 if self.current_segment is not None:
                     self._finalize_segment(elapsed_mono, elapsed_wall)
                 self._start_segment(segment_index)
+
+            # Write runtime status approximately once per second
+            now = time.monotonic()
+            if now - last_runtime_status_update >= 1.0:
+                self._write_runtime_status(running=True)
+                last_runtime_status_update = now
 
             # Drain whatever is queued; block briefly so we don't busy-spin.
             try:
@@ -261,13 +309,16 @@ class Recorder:
             return False
 
         list_channels(self.mumble)
-        if find_and_join_channel(self.mumble, self.config.mumble_channel) is None:
+        channel = find_and_join_channel(self.mumble, self.config.mumble_channel)
+        if channel is None:
             self.stop_reason = "channel_join_failed"
             self.mumble.stop()
             self.session_stop_wall_clock = datetime.now(timezone.utc).astimezone()
             self.session_stop_monotonic = time.monotonic()
             self._create_session_metadata(is_failed=True)
             return False
+
+        self.channel = channel
 
         # Set session start timestamps here — after connect and channel join —
         # so filenames and metadata reflect actual recording start, not object
@@ -335,6 +386,12 @@ class Recorder:
         self.mumble.stop()
 
         self.session_stop_wall_clock = datetime.now(timezone.utc).astimezone()
+
+        # Update runtime status with final state
+        try:
+            self._write_runtime_status(running=False)
+        except Exception as e:
+            logger.warning(f"Failed to write final runtime status: {e}")
 
         is_failed = self.stop_reason in ("writer_error", "mumble_connection_failed", "channel_join_failed")
         is_interrupted = self.stop_reason in ("signal_sigterm", "signal_sigint", "keyboard_interrupt", "mumble_disconnected")

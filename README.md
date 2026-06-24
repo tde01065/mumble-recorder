@@ -122,6 +122,30 @@ docker compose --profile headless down
 | `OUTPUT_DIR` | `/recordings` | No | Output directory for recording segments (inside container) |
 | `RECORDING_MODE` | `continuous` | No | Recording mode: `continuous` or `received_audio_only` |
 | `SEGMENT_DURATION_SECONDS` | `1800` | No | Segment duration in seconds (default 30 minutes) |
+| `TZ` | `UTC` | No | Timezone for local timestamps in recordings and UI (e.g., `Europe/Stockholm`, `America/New_York`) |
+
+### Timezone Configuration
+
+By default, the container uses UTC for all timestamps. To display local timestamps in recording metadata and the web UI, set the `TZ` environment variable:
+
+```bash
+TZ=Europe/Stockholm
+```
+
+Common timezone examples:
+- `Europe/Stockholm` — Central European Time
+- `Europe/London` — Greenwich Mean Time
+- `America/New_York` — Eastern Time
+- `America/Los_Angeles` — Pacific Time
+- `Asia/Tokyo` — Japan Standard Time
+- `UTC` — Coordinated Universal Time (default)
+
+The timezone affects:
+- Local timestamps in session metadata JSON files
+- Local timestamps displayed in the web UI
+- File rotation times (if configured based on local time)
+
+If `TZ` is not set or the timezone is invalid, the container falls back to UTC.
 
 ## Build
 

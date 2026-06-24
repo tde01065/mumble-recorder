@@ -174,3 +174,44 @@ def find_and_join_channel(
     except Exception as e:
         logger.error(f"Failed to join channel '{target_name}': {e}", exc_info=True)
         return None
+
+
+def get_channel_users(channel: Any) -> list[str]:
+    """Get list of user names in a channel.
+
+    Returns list of display names or usernames. If extraction fails, logs warning
+    and returns empty list rather than raising.
+    """
+    if not channel:
+        return []
+
+    try:
+        users = channel.get_users()
+        if not users:
+            return []
+
+        user_names = []
+        for user in users.values():
+            if user is None:
+                continue
+
+            # Try display name first, fall back to name
+            try:
+                if hasattr(user, "get_property"):
+                    name = user.get_property("name")
+                elif hasattr(user, "get"):
+                    name = user.get("name")
+                elif hasattr(user, "name"):
+                    name = user.name
+                else:
+                    name = None
+
+                if name:
+                    user_names.append(name)
+            except (AttributeError, KeyError):
+                pass
+
+        return user_names
+    except Exception as e:
+        logger.warning(f"Failed to get channel users: {e}")
+        return []

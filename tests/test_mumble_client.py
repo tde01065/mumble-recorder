@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 # Mock pymumble_py3 before importing mumble_client
 sys.modules['pymumble_py3'] = MagicMock()
 
-from mumble_recorder.mumble_client import wait_until_ready, connect_to_mumble
+from mumble_recorder.mumble_client import wait_until_ready, connect_to_mumble, get_channel_users
 
 
 class TestWaitUntilReady(unittest.TestCase):
@@ -171,6 +171,70 @@ class TestConnectToMumble(unittest.TestCase):
 
                 self.assertEqual(result, mock_mumble)
                 mock_mumble.start.assert_called_once()
+
+
+class TestGetChannelUsers(unittest.TestCase):
+    """Test get_channel_users channel user extraction."""
+
+    def test_get_channel_users_returns_list_of_names(self):
+        """get_channel_users returns list of user names from channel."""
+        mock_channel = MagicMock()
+        # Create user mocks that have only a name attribute (not get_property or get methods)
+        mock_user1 = MagicMock(spec=['name'])
+        mock_user1.name = "Alice"
+        mock_user2 = MagicMock(spec=['name'])
+        mock_user2.name = "Bob"
+        # get_users() returns a dict, not a list
+        mock_channel.get_users.return_value = {"user1": mock_user1, "user2": mock_user2}
+
+        result = get_channel_users(mock_channel)
+
+        # Result should contain both names (order may vary)
+        self.assertEqual(set(result), {"Alice", "Bob"})
+
+    def test_get_channel_users_returns_empty_list_on_failure(self):
+        """get_channel_users returns empty list on lookup failure."""
+        mock_channel = MagicMock()
+        mock_channel.get_users.side_effect = Exception("Channel lookup failed")
+
+        result = get_channel_users(mock_channel)
+
+        self.assertEqual(result, [])
+
+    def test_get_channel_users_handles_none_channel(self):
+        """get_channel_users returns empty list when channel is None."""
+        result = get_channel_users(None)
+
+        self.assertEqual(result, [])
+
+    def test_get_channel_users_handles_empty_dict(self):
+        """get_channel_users returns empty list when get_users returns empty dict."""
+        mock_channel = MagicMock()
+        mock_channel.get_users.return_value = {}
+
+        result = get_channel_users(mock_channel)
+
+        self.assertEqual(result, [])
+
+    def test_get_channel_users_handles_attribute_error(self):
+        """get_channel_users returns empty list on AttributeError."""
+        mock_channel = MagicMock()
+        mock_channel.get_users.side_effect = AttributeError("'NoneType' has no attribute 'name'")
+
+        result = get_channel_users(mock_channel)
+
+        self.assertEqual(result, [])
+
+    def test_get_channel_users_skips_none_users(self):
+        """get_channel_users skips None values in user dict."""
+        mock_channel = MagicMock()
+        mock_user1 = MagicMock(spec=['name'])
+        mock_user1.name = "Alice"
+        mock_channel.get_users.return_value = {"user1": mock_user1, "user2": None}
+
+        result = get_channel_users(mock_channel)
+
+        self.assertEqual(result, ["Alice"])
 
 
 if __name__ == "__main__":

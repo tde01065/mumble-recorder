@@ -1398,6 +1398,123 @@ class TestRecorderStatePersistence(unittest.TestCase):
         self.assertTrue(state["desired_running"])
         self.assertEqual(state["recording_mode"], "continuous")
 
+    def test_format_duration_seconds_only(self):
+        """format_duration returns 'Xs' for durations < 1 minute."""
+        from mumble_recorder.web import format_duration
+        self.assertEqual(format_duration(0), "0s")
+        self.assertEqual(format_duration(34), "34s")
+        self.assertEqual(format_duration(59), "59s")
+
+    def test_format_duration_minutes_and_seconds(self):
+        """format_duration returns 'XmYZs' for durations < 1 hour."""
+        from mumble_recorder.web import format_duration
+        self.assertEqual(format_duration(60), "1m 00s")
+        self.assertEqual(format_duration(90), "1m 30s")
+        self.assertEqual(format_duration(662), "11m 02s")
+        self.assertEqual(format_duration(3599), "59m 59s")
+
+    def test_format_duration_hours_minutes_seconds(self):
+        """format_duration returns 'XhYmZs' for durations >= 1 hour."""
+        from mumble_recorder.web import format_duration
+        self.assertEqual(format_duration(3600), "1h 00m 00s")
+        self.assertEqual(format_duration(3661), "1h 01m 01s")
+        self.assertEqual(format_duration(7322), "2h 02m 02s")
+
+    def test_format_duration_with_floats(self):
+        """format_duration handles float seconds."""
+        from mumble_recorder.web import format_duration
+        self.assertEqual(format_duration(12.3), "12s")
+        self.assertEqual(format_duration(12.7), "13s")
+        self.assertEqual(format_duration(90.5), "1m 30s")
+
+    def test_load_runtime_status_not_found(self):
+        """load_runtime_status returns None when file doesn't exist."""
+        from mumble_recorder.web import load_runtime_status
+        result = load_runtime_status(self.temp_dir.name)
+        self.assertIsNone(result)
+
+    def test_load_runtime_status_valid_file(self):
+        """load_runtime_status loads valid runtime status JSON."""
+        from mumble_recorder.web import load_runtime_status
+        runtime_data = {
+            "running": True,
+            "session_id": "test123",
+            "recording_group_id": "group456",
+            "recording_mode": "received_audio_only",
+            "channel_name": "TestChannel",
+            "channel_users": ["User1", "User2"],
+            "wall_clock_duration_seconds": 123.4,
+            "audio_duration_seconds": 45.6,
+            "updated_at_local": "2026-06-24 14:30:00",
+            "updated_at_utc": "2026-06-24 12:30:00 UTC",
+        }
+        runtime_file = Path(self.temp_dir.name) / "recorder_runtime_status.json"
+        with open(runtime_file, "w") as f:
+            json.dump(runtime_data, f)
+
+        result = load_runtime_status(self.temp_dir.name)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["session_id"], "test123")
+        self.assertTrue(result["running"])
+        self.assertEqual(len(result["channel_users"]), 2)
+
+    def test_load_runtime_status_malformed_file(self):
+        """load_runtime_status returns None for malformed JSON."""
+        from mumble_recorder.web import load_runtime_status
+        runtime_file = Path(self.temp_dir.name) / "recorder_runtime_status.json"
+        runtime_file.write_text("{invalid json}")
+
+        result = load_runtime_status(self.temp_dir.name)
+        self.assertIsNone(result)
+
+    def test_api_recorder_status_includes_runtime_when_available(self):
+        """GET /api/recorder/status includes runtime data if file exists."""
+        from mumble_recorder.web import load_runtime_status
+        runtime_data = {
+            "running": True,
+            "session_id": "sess_abc123",
+            "recording_group_id": "grp_xyz",
+            "recording_mode": "continuous",
+            "channel_name": "Main",
+            "channel_users": ["Alice", "Bob", "Charlie"],
+            "wall_clock_duration_seconds": 234.5,
+            "audio_duration_seconds": 123.4,
+            "updated_at_local": "2026-06-24 14:35:00",
+            "updated_at_utc": "2026-06-24 12:35:00 UTC",
+        }
+        runtime_file = Path(self.temp_dir.name) / "recorder_runtime_status.json"
+        with open(runtime_file, "w") as f:
+            json.dump(runtime_data, f)
+
+        response = self.client.get("/api/recorder/status")
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.data)
+
+        self.assertIn("runtime", data)
+        self.assertEqual(data["runtime"]["session_id"], "sess_abc123")
+        self.assertEqual(data["runtime"]["channel_name"], "Main")
+        self.assertEqual(data["runtime"]["channel_users"], ["Alice", "Bob", "Charlie"])
+
+    def test_api_recorder_status_excludes_runtime_when_missing(self):
+        """GET /api/recorder/status excludes runtime field if file missing."""
+        response = self.client.get("/api/recorder/status")
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.data)
+
+        self.assertNotIn("runtime", data)
+
+    def test_api_recorder_status_skips_malformed_runtime(self):
+        """GET /api/recorder/status skips malformed runtime file gracefully."""
+        runtime_file = Path(self.temp_dir.name) / "recorder_runtime_status.json"
+        runtime_file.write_text('{"broken": json}')
+
+        response = self.client.get("/api/recorder/status")
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.data)
+
+        # Should not crash, just skip runtime field
+        self.assertNotIn("runtime", data)
+
 
 if __name__ == "__main__":
     unittest.main()

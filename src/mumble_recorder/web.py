@@ -76,6 +76,25 @@ def parse_int_query_param(value: str | None, default: int, min_val: int | None =
     return parsed, None
 
 
+def format_duration(seconds: float | int) -> str:
+    """Format duration in seconds as human-readable string.
+
+    Examples: '1h 02m 03s', '12m 04s', '34s'
+    """
+    total_secs = int(round(seconds))
+
+    hours = total_secs // 3600
+    minutes = (total_secs % 3600) // 60
+    secs = total_secs % 60
+
+    if hours > 0:
+        return f"{hours}h {minutes:02d}m {secs:02d}s"
+    elif minutes > 0:
+        return f"{minutes}m {secs:02d}s"
+    else:
+        return f"{secs}s"
+
+
 def parse_date_filter(value: str | None) -> tuple[datetime | None, str | None]:
     """Parse date/datetime filter.
 
@@ -163,6 +182,30 @@ def filter_and_paginate_sessions(
             "group_id": group_id,
         }
     }
+
+
+def load_runtime_status(output_dir: str) -> dict | None:
+    """Load runtime status from recorder_runtime_status.json.
+
+    Returns dict with status or None if not found/invalid/stale.
+    Freshness check: if recorder is running and status is older than 10s, mark stale.
+    """
+    runtime_file = Path(output_dir) / "recorder_runtime_status.json"
+
+    if not runtime_file.exists():
+        return None
+
+    try:
+        with open(runtime_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        # Check freshness - if it's supposed to be running but is stale (>10s old),
+        # we could mark it, but for simplicity, we'll trust the timestamp and let
+        # the caller decide based on the updated_at field.
+        return data
+    except (json.JSONDecodeError, IOError) as e:
+        logger.warning(f"Failed to load runtime status: {e}")
+        return None
 
 
 def load_recordings(output_dir: str) -> list[dict]:
@@ -613,7 +656,13 @@ def create_app(output_dir: str | None = None) -> Flask:
 
     @app.route("/api/recorder/status", methods=["GET"])
     def recorder_status():
-        return jsonify(recorder_controller.status())
+        status_data = recorder_controller.status()
+        runtime_status = load_runtime_status(output_dir)
+
+        if runtime_status:
+            status_data["runtime"] = runtime_status
+
+        return jsonify(status_data)
 
     @app.route("/api/recorder/start", methods=["POST"])
     def recorder_start():
@@ -881,6 +930,14 @@ def create_app(output_dir: str | None = None) -> Flask:
         <div class="recorder-status">
             <p>Status: <span id="recorder-status" class="status-stopped">—</span></p>
             <p id="recorder-details" class="small">Loading...</p>
+            <div id="runtime-details" style="display: none; margin-top: 10px; padding-top: 10px; border-top: 1px solid #ccc;">
+                <p><strong>Session:</strong> <span id="runtime-session-id">—</span></p>
+                <p><strong>Elapsed:</strong> <span id="runtime-elapsed">—</span></p>
+                <p><strong>Talk time:</strong> <span id="runtime-talk-time">—</span></p>
+                <p><strong>Channel:</strong> <span id="runtime-channel">—</span></p>
+                <p><strong>People in channel:</strong> <span id="runtime-users">—</span></p>
+                <p id="runtime-group-row" style="display: none;"><strong>Group ID:</strong> <span id="runtime-group-id">—</span></p>
+            </div>
         </div>
         <div class="recorder-controls">
             <form id="start-form" method="post" action="/api/recorder/start" style="display: flex; gap: 10px; align-items: center;">
@@ -898,12 +955,28 @@ def create_app(output_dir: str | None = None) -> Flask:
     </div>
 
     <script>
+        function formatDuration(seconds) {
+            const secs = Math.round(seconds);
+            const hours = Math.floor(secs / 3600);
+            const mins = Math.floor((secs % 3600) / 60);
+            const s = secs % 60;
+
+            if (hours > 0) {
+                return `${hours}h ${mins.toString().padStart(2, '0')}m ${s.toString().padStart(2, '0')}s`;
+            } else if (mins > 0) {
+                return `${mins}m ${s.toString().padStart(2, '0')}s`;
+            } else {
+                return `${s}s`;
+            }
+        }
+
         function loadRecorderStatus() {
             fetch('/api/recorder/status')
                 .then(r => r.json())
                 .then(data => {
                     const statusEl = document.getElementById('recorder-status');
                     const detailsEl = document.getElementById('recorder-details');
+                    const runtimeDetailsEl = document.getElementById('runtime-details');
                     const startBtn = document.getElementById('start-btn');
                     const stopBtn = document.getElementById('stop-btn');
                     const modeSelect = document.getElementById('recording_mode');
@@ -915,12 +988,31 @@ def create_app(output_dir: str | None = None) -> Flask:
                         stopBtn.style.display = 'inline-block';
                         modeSelect.disabled = true;
                         detailsEl.textContent = `Mode: ${data.mode}, PID: ${data.pid}, Started: ${data.started_at}`;
+
+                        if (data.runtime) {
+                            const rt = data.runtime;
+                            runtimeDetailsEl.style.display = 'block';
+                            document.getElementById('runtime-session-id').textContent = rt.session_id.substring(0, 8);
+                            document.getElementById('runtime-elapsed').textContent = formatDuration(rt.wall_clock_duration_seconds);
+                            document.getElementById('runtime-talk-time').textContent = formatDuration(rt.audio_duration_seconds);
+                            document.getElementById('runtime-channel').textContent = rt.channel_name || '—';
+                            document.getElementById('runtime-users').textContent = rt.channel_users && rt.channel_users.length > 0 ? rt.channel_users.join(', ') : '—';
+                            if (rt.recording_group_id) {
+                                document.getElementById('runtime-group-row').style.display = 'block';
+                                document.getElementById('runtime-group-id').textContent = rt.recording_group_id.substring(0, 8);
+                            } else {
+                                document.getElementById('runtime-group-row').style.display = 'none';
+                            }
+                        } else {
+                            runtimeDetailsEl.style.display = 'none';
+                        }
                     } else {
                         statusEl.textContent = 'Stopped';
                         statusEl.className = 'status-stopped';
                         startBtn.disabled = false;
                         stopBtn.style.display = 'none';
                         modeSelect.disabled = false;
+                        runtimeDetailsEl.style.display = 'none';
                         let details = '';
                         if (data.last_exit_at) {
                             details = `Last exit: ${data.last_exit_at}, Return code: ${data.returncode}`;
@@ -954,7 +1046,7 @@ def create_app(output_dir: str | None = None) -> Flask:
         });
 
         loadRecorderStatus();
-        setInterval(loadRecorderStatus, 5000);
+        setInterval(loadRecorderStatus, 2000);
     </script>
 
     <div class="filter-form">

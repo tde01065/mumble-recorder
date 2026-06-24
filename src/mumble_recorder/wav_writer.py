@@ -134,6 +134,10 @@ class SegmentWriter:
 
         self.writer.close()
 
+    def get_accumulated_audio_duration(self) -> float:
+        """Get current accumulated audio duration for this segment (before finalization)."""
+        return self.writer.total_duration_seconds
+
     def get_metadata(self) -> dict:
         return {
             "wall_clock_duration": self.segment_wall_clock_elapsed,

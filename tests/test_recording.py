@@ -4,6 +4,7 @@ import tempfile
 import unittest
 import time
 import json
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 from datetime import datetime, timezone
 
@@ -543,6 +544,78 @@ class TestUnlimitedDuration(unittest.TestCase):
         self.assertFalse(should_stop)
 
 
+class TestRuntimeStatusLive(unittest.TestCase):
+    """Test runtime status calculation for live talk time."""
+
+    def test_runtime_status_includes_active_segment_audio_duration(self):
+        """Test that runtime status includes current active segment's audio duration."""
+        from mumble_recorder.wav_writer import SegmentWriter
+        config = _mock_config()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config.output_dir = tmpdir
+            recorder = Recorder(config)
+            recorder.session_start_monotonic = time.monotonic()
+            recorder.session_start_wall_clock = datetime.now(timezone.utc).astimezone()
+
+            # Create a mock active segment with some audio
+            mock_segment = MagicMock(spec=SegmentWriter)
+            mock_segment.get_accumulated_audio_duration.return_value = 5.5
+            recorder.current_segment = mock_segment
+
+            # Add finalized segments
+            from mumble_recorder.metadata import SegmentMetadata
+            recorder.segments_metadata.append(SegmentMetadata(
+                segment_index=0,
+                segment_started_at_local="2026-01-01 12:00:00",
+                segment_started_at_utc="2026-01-01 12:00:00 UTC",
+                segment_stopped_at_local="2026-01-01 12:00:10",
+                segment_stopped_at_utc="2026-01-01 12:00:10 UTC",
+                wall_clock_duration_seconds=10.0,
+                audio_duration_seconds=3.0,
+                file_name="test.wav",
+                file_path="/tmp/test.wav",
+                size_bytes=1000,
+            ))
+
+            recorder._write_runtime_status(running=True)
+
+            runtime_file = Path(tmpdir) / "recorder_runtime_status.json"
+            self.assertTrue(runtime_file.exists())
+
+            with open(runtime_file, "r") as f:
+                status = json.load(f)
+
+            # Audio duration should include finalized (3.0) + active (5.5) = 8.5
+            self.assertEqual(status["audio_duration_seconds"], 8.5)
+            self.assertTrue(status["running"])
+
+    def test_final_runtime_status_remains_in_file(self):
+        """Test that final runtime status file persists with running=false."""
+        config = _mock_config()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config.output_dir = tmpdir
+            recorder = Recorder(config)
+            recorder.session_start_monotonic = time.monotonic()
+            recorder.session_start_wall_clock = datetime.now(timezone.utc).astimezone()
+
+            # Write initial runtime status
+            recorder._write_runtime_status(running=True)
+            runtime_file = Path(tmpdir) / "recorder_runtime_status.json"
+            self.assertTrue(runtime_file.exists())
+
+            # Write final runtime status
+            recorder._write_runtime_status(running=False)
+
+            # File should still exist after being marked as not running
+            self.assertTrue(runtime_file.exists())
+
+            with open(runtime_file, "r") as f:
+                status = json.load(f)
+
+            self.assertFalse(status["running"])
+            self.assertIn("session_id", status)
+            self.assertIn("audio_duration_seconds", status)
+
+
 if __name__ == "__main__":
     unittest.main()
-
